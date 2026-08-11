@@ -1,0 +1,86 @@
+name: Windows launcher
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out holder-launcher
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake `
+            -S . `
+            -B build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DCMAKE_CXX_COMPILER=cl
+
+      - name: Build launcher
+        run: cmake --build build --target Holder --parallel
+
+      - name: Stage launcher artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $stageDir = "out\artifacts\windows-launcher"
+          if (Test-Path $stageDir) {
+            Remove-Item $stageDir -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Force $stageDir | Out-Null
+          Copy-Item "build\Holder.exe" -Destination $stageDir -Force
+
+          Get-ChildItem $stageDir -Recurse -File |
+            ForEach-Object { $_.FullName.Substring((Resolve-Path $stageDir).Path.Length + 1).Replace("\", "/") } |
+            Sort-Object |
+            Set-Content -Encoding UTF8 (Join-Path $stageDir "manifest.txt")
+
+          Get-ChildItem $stageDir -Recurse -File |
+            Select-Object FullName, Length |
+            Sort-Object FullName
+
+      - name: Smoke-test staged launcher artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $launcher = "out\artifacts\windows-launcher\Holder.exe"
+          $manifest = "out\artifacts\windows-launcher\manifest.txt"
+
+          if (!(Test-Path $launcher)) {
+            throw "Missing launcher executable: $launcher"
+          }
+          if (!(Test-Path $manifest)) {
+            throw "Missing launcher manifest: $manifest"
+          }
+          if ((Get-Item $launcher).Length -le 0) {
+            throw "Launcher executable is empty"
+          }
+          if (!(Select-String -Path $manifest -Pattern "^Holder\.exe$" -Quiet)) {
+            throw "Launcher manifest does not list Holder.exe"
+          }
+
+      - name: Upload launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: holder-launcher-windows
+          path: out/artifacts/windows-launcher/*
+          if-no-files-found: error
+          retention-days: 7
