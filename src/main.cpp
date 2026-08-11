@@ -135,7 +135,7 @@ InstallLayout resolve_layout() {
   return side_by_side_layout;
 }
 
-bool backend_health_check() {
+bool backend_ping() {
   HINTERNET session = WinHttpOpen(
       L"Holder Launcher/1.0",
       WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -156,7 +156,7 @@ bool backend_health_check() {
   HINTERNET request = WinHttpOpenRequest(
       connect,
       L"GET",
-      L"/health",
+      L"/ping",
       nullptr,
       WINHTTP_NO_REFERER,
       WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -241,7 +241,7 @@ bool start_process(
 
 bool wait_for_backend_health() {
   for (int attempt = 0; attempt < kHealthAttempts; ++attempt) {
-    if (backend_health_check()) {
+    if (backend_ping()) {
       return true;
     }
     std::this_thread::sleep_for(kHealthDelay);
@@ -262,7 +262,7 @@ int run_launcher() {
     return 1;
   }
 
-  if (!backend_health_check()) {
+  if (!backend_ping()) {
     append_log(L"Backend is not healthy; starting holderd.exe");
     std::wstring backend_error;
     if (!start_process(layout.backend_exe, layout.root_dir, CREATE_NO_WINDOW, &backend_error)) {
