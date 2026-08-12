@@ -67,3 +67,69 @@ appends a small log to:
 ```text
 %LOCALAPPDATA%\holder\launcher.log
 ```
+
+## macOS
+
+`Holder` is also the user-facing executable inside `Holder.app`.
+
+The macOS launcher has the same job as the Windows launcher:
+
+1. Check whether the local Holder backend responds to `GET /ping`.
+2. Start `holderd` if the backend is not running.
+3. Wait briefly for the backend to become ready.
+4. Start `holder-desktop`.
+5. Exit.
+
+The launcher has no GTK, Qt, Boost, curl, or Homebrew/MacPorts API dependency.
+It uses POSIX process spawning and a tiny localhost socket probe.
+
+### Expected Layout
+
+App bundle layout:
+
+```text
+Holder.app/
+  Contents/
+    MacOS/
+      Holder
+    Resources/
+      bin/
+        holder-desktop
+        holderd
+        holderctl
+      schema/
+      config/
+      assets/
+      share/
+      lib/
+```
+
+Developer side-by-side layout is also accepted:
+
+```text
+bin/
+  Holder
+  holder-desktop
+  holderd
+  holderctl
+```
+
+### Build
+
+On macOS:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+```
+
+The output executable is `build/Holder`.
+
+### Diagnostics
+
+Failures are reported with a native macOS alert. The launcher also appends a
+small log to:
+
+```text
+~/Library/Logs/Holder/launcher.log
+```
