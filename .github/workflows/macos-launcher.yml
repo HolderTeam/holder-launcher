@@ -1,0 +1,66 @@
+name: macOS launcher
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out holder-launcher
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build launcher
+        run: cmake --build build --target Holder --parallel
+
+      - name: Stage launcher artifact
+        run: |
+          set -euo pipefail
+
+          stage_dir="out/artifacts/macos-launcher"
+          rm -rf "${stage_dir}"
+          mkdir -p "${stage_dir}"
+
+          cp build/Holder "${stage_dir}/Holder"
+
+          (
+            cd "${stage_dir}"
+            find . -type f \
+              | sed 's#^\./##' \
+              | sort \
+              > manifest.txt
+          )
+
+          find "${stage_dir}" -type f -maxdepth 2 -print | sort
+
+      - name: Smoke-test staged launcher artifact
+        run: |
+          set -euo pipefail
+
+          test -f out/artifacts/macos-launcher/Holder
+          test -f out/artifacts/macos-launcher/manifest.txt
+          test -s out/artifacts/macos-launcher/Holder
+          grep -qx 'Holder' out/artifacts/macos-launcher/manifest.txt
+
+      - name: Upload launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: holder-launcher-macos
+          path: out/artifacts/macos-launcher/*
+          if-no-files-found: error
+          retention-days: 7

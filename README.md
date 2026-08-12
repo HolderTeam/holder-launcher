@@ -1,5 +1,16 @@
 # holder-launcher
 
+App launcher for Holder. 
+
+Holder-daemon aka holderd (the backend server) runs in the background,
+the reference GTK implementation (holder-desktop) runs in the frontend
+and expects holderd to be listening.
+
+To make a friendly user experience. The launcher checks the backend is up,
+starts it if needed, then hands the user over to the frontend.
+
+## Windows
+
 Windows product launcher for Holder.
 
 `Holder.exe` is the user-facing Windows entrypoint. It keeps the GTK frontend
@@ -14,7 +25,7 @@ focused on UI work by handling Windows startup policy:
 The launcher has no GTK, Qt, MSYS2, Boost, or curl dependency. It uses Win32 and
 WinHTTP directly.
 
-## Expected Layout
+### Expected Layout
 
 Installer layout:
 
@@ -37,7 +48,7 @@ bin/
   holderctl.exe
 ```
 
-## Build
+### Build
 
 From a Visual Studio developer shell:
 
@@ -48,7 +59,7 @@ cmake --build build
 
 The output executable is `build/Holder.exe`.
 
-## Diagnostics
+### Diagnostics
 
 Failures are reported with a native Windows message box. The launcher also
 appends a small log to:

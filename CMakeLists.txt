@@ -8,23 +8,30 @@ endif()
 
 project(holder_launcher VERSION "${HOLDER_LAUNCHER_VERSION}" LANGUAGES CXX)
 
-if(NOT WIN32)
-  message(FATAL_ERROR "holder-launcher is a Windows-only Win32 launcher")
+if(WIN32)
+  add_executable(Holder WIN32
+    src/windows/main.cpp
+  )
+elseif(APPLE)
+  add_executable(Holder
+    src/macos/main.cpp
+  )
+else()
+  message(FATAL_ERROR "holder-launcher currently supports Windows and macOS only")
 endif()
 
-add_executable(Holder WIN32
-  src/main.cpp
-)
-
 target_compile_features(Holder PRIVATE cxx_std_20)
-target_compile_definitions(Holder PRIVATE
-  UNICODE
-  _UNICODE
-  WIN32_LEAN_AND_MEAN
-  NOMINMAX
-)
 
-target_link_libraries(Holder PRIVATE
-  user32
-  winhttp
-)
+if(WIN32)
+  target_compile_definitions(Holder PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+  )
+
+  target_link_libraries(Holder PRIVATE
+    user32
+    winhttp
+  )
+endif()
