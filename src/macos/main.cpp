@@ -183,6 +183,8 @@ bool start_process(
   );
   setenv("GTK_PATH", (working_dir / "lib" / "gtk-4.0").c_str(), 1);
   setenv("XDG_DATA_DIRS", (working_dir / "share").c_str(), 1);
+  setenv("ENCHANT_CONFIG_DIR", (working_dir / "share" / "enchant-2").c_str(), 1);
+  setenv("DICPATH", (working_dir / "share" / "enchant" / "hunspell").c_str(), 1);
 
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
