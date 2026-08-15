@@ -77,11 +77,12 @@ The macOS launcher has the same job as the Windows launcher:
 1. Check whether the local Holder backend responds to `GET /ping`.
 2. Start `holderd` if the backend is not running.
 3. Wait briefly for the backend to become ready.
-4. Start `holder-desktop`.
-5. Exit.
+4. Replace itself with `holder-desktop`.
 
 The launcher has no GTK, Qt, Boost, curl, or Homebrew/MacPorts API dependency.
-It uses POSIX process spawning and a tiny localhost socket probe.
+It uses POSIX process launching and a tiny localhost socket probe. The frontend
+is launched with `exec` so macOS keeps the running app associated with
+`Holder.app` for Dock identity.
 
 ### Expected Layout
 

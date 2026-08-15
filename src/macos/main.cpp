@@ -169,11 +169,7 @@ bool backend_ping() {
          std::string_view::npos;
 }
 
-bool start_process(
-    const std::filesystem::path& exe,
-    const std::filesystem::path& working_dir,
-    std::string* error
-) {
+void configure_runtime_environment(const std::filesystem::path& working_dir) {
   setenv("GSETTINGS_SCHEMA_DIR", (working_dir / "share" / "glib-2.0" / "schemas").c_str(), 1);
   setenv("GIO_MODULE_DIR", (working_dir / "lib" / "gio" / "modules").c_str(), 1);
   setenv(
@@ -185,6 +181,14 @@ bool start_process(
   setenv("XDG_DATA_DIRS", (working_dir / "share").c_str(), 1);
   setenv("ENCHANT_CONFIG_DIR", (working_dir / "share" / "enchant-2").c_str(), 1);
   setenv("DICPATH", (working_dir / "share" / "enchant" / "hunspell").c_str(), 1);
+}
+
+bool start_process(
+    const std::filesystem::path& exe,
+    const std::filesystem::path& working_dir,
+    std::string* error
+) {
+  configure_runtime_environment(working_dir);
 
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
@@ -212,6 +216,30 @@ bool start_process(
   }
 
   return true;
+}
+
+bool exec_process(
+    const std::filesystem::path& exe,
+    const std::filesystem::path& working_dir,
+    std::string* error
+) {
+  configure_runtime_environment(working_dir);
+
+  if (chdir(working_dir.c_str()) != 0) {
+    if (error) {
+      *error = "Failed to enter " + working_dir.string() + ": " + std::strerror(errno);
+    }
+    return false;
+  }
+
+  std::string executable = exe.string();
+  char* argv[] = {executable.data(), nullptr};
+  execve(executable.c_str(), argv, environ);
+
+  if (error) {
+    *error = "Failed to start " + executable + ": " + std::strerror(errno);
+  }
+  return false;
 }
 
 bool wait_for_backend_health() {
@@ -257,12 +285,11 @@ int run_launcher() {
 
   append_log("Starting holder-desktop");
   std::string desktop_error;
-  if (!start_process(layout.desktop_exe, layout.root_dir, &desktop_error)) {
+  if (!exec_process(layout.desktop_exe, layout.root_dir, &desktop_error)) {
     show_error(desktop_error);
     return 1;
   }
 
-  append_log("Holder launcher complete");
   return 0;
 }
 
