@@ -1,4 +1,5 @@
 #include "BackendProbe.h"
+#include "BackendStartup.h"
 #include "InstallLayout.h"
 
 #include <Availability.h>
@@ -23,8 +24,6 @@ extern char** environ;
 namespace {
 
 constexpr uint16_t kBackendPort = 11499;
-constexpr int kHealthAttempts = 32;
-constexpr auto kHealthDelay = std::chrono::milliseconds(250);
 
 std::filesystem::path executable_path() {
   std::vector<char> buffer(4096);
@@ -89,10 +88,6 @@ void show_error(std::string_view message) {
   (void)std::system(command.c_str());
 }
 
-bool backend_ping() {
-  return holder::backend_ping(kBackendPort, std::chrono::seconds(1));
-}
-
 void configure_runtime_environment(const std::filesystem::path& working_dir) {
   setenv("GSETTINGS_SCHEMA_DIR", (working_dir / "share" / "glib-2.0" / "schemas").c_str(), 1);
   setenv("GIO_MODULE_DIR", (working_dir / "lib" / "gio" / "modules").c_str(), 1);
@@ -110,7 +105,8 @@ void configure_runtime_environment(const std::filesystem::path& working_dir) {
 bool start_process(
     const std::filesystem::path& exe,
     const std::filesystem::path& working_dir,
-    std::string* error
+    std::string* error,
+    pid_t& pid
 ) {
   configure_runtime_environment(working_dir);
 
@@ -145,7 +141,7 @@ bool start_process(
     return false;
   }
 
-  pid_t pid = 0;
+  pid = 0;
   std::string executable = exe.string();
   char* argv[] = {executable.data(), nullptr};
 
@@ -193,16 +189,6 @@ bool exec_process(
   return false;
 }
 
-bool wait_for_backend_health() {
-  for (int attempt = 0; attempt < kHealthAttempts; ++attempt) {
-    if (backend_ping()) {
-      return true;
-    }
-    std::this_thread::sleep_for(kHealthDelay);
-  }
-  return false;
-}
-
 int run_launcher() {
   const auto layout = holder::resolve_layout(executable_path());
   append_log("Holder launcher starting");
@@ -212,23 +198,26 @@ int run_launcher() {
     return 1;
   }
 
-  if (!backend_ping()) {
-    append_log("Backend is not healthy; starting holderd");
-    std::string backend_error;
-    if (!start_process(layout.backend_exe, layout.root_dir, &backend_error)) {
-      show_error(backend_error);
-      return 1;
-    }
-
-    if (!wait_for_backend_health()) {
-      show_error(
-          "Holder backend did not become ready.\n\n"
-          "Check:\n\n" +
-          log_path().string()
-      );
-      return 1;
-    }
+  pid_t backend_pid = 0;
+  const holder::StartupActions actions{
+      [] { return holder::StartupClock::now(); },
+      [](auto delay) { std::this_thread::sleep_for(delay); },
+      [](auto timeout) { return holder::backend_ping(kBackendPort, timeout); },
+      [&] {
+        append_log("Backend is not healthy; starting holderd (60-second readiness budget)");
+        std::string error;
+        start_process(layout.backend_exe, layout.root_dir, &error, backend_pid);
+        return error;
+      },
+      [&] { return holder::backend_exit_status(backend_pid); },
+  };
+  if (const auto error = holder::ensure_backend(actions); !error.empty()) {
+    show_error(error + "\n\nLauncher log:\n" + log_path().string());
+    return 1;
   }
+  // Reap our child if it exited while a competing backend became ready.
+  // A still-running daemon is left alone and survives the desktop exec handoff.
+  (void)holder::backend_exit_status(backend_pid);
 
   append_log("Starting holder-desktop");
   std::string desktop_error;

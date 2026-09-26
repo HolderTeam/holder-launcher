@@ -172,8 +172,23 @@ The production probe uses `127.0.0.1:11499` and requires HTTP 200 with the exact
 `pong` body. It accepts Content-Length or connection-close framing; transfer
 encoding is rejected because the daemon's `/ping` contract does not use it.
 Responses are limited to 8 KiB, with a one-second deadline covering connection,
-request, and response. This is a liveness check, not authentication. The overall
-startup retry loop still has a separate budget; one second is the per-probe bound.
+request, and response. This is a liveness check, not authentication.
+
+macOS startup gives the backend up to 60 seconds to become ready, including the
+initial probe and subsequent retries. It opens the desktop immediately on a
+successful probe, with at most 250 ms between attempts. Each probe and sleep is
+limited to the remaining budget. The budget begins after installation validation;
+it is a readiness deadline, not a timeout for OS process creation or GUI alerts.
+
+If the backend child exits early, the launcher reaps it and rechecks health once
+in case another launcher started a healthy daemon. Otherwise it reports the exit
+code or signal promptly. A timeout does not kill the backend or restart it.
+Concurrent launches whose winning daemon is still starting at that final check
+remain a follow-up case.
+
+Startup tests use a fake clock to cover slow cold starts, deadline boundaries,
+spawn failure, and healthy concurrent-winner reuse without waiting a real minute.
+Native child-process tests also verify nonblocking status checks and exit reaping.
 
 ### Diagnostics
 
