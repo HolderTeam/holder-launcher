@@ -59,6 +59,43 @@ cmake --build build
 
 The output executable is `build/Holder.exe`.
 
+### Tests
+
+The default Windows build includes native WinHTTP and launcher-entrypoint tests.
+Python 3 is required for the test harness (standard library only):
+
+```powershell
+ctest --test-dir build --output-on-failure
+```
+
+With a Visual Studio generator, build with `--config RelWithDebInfo` and pass
+`-C RelWithDebInfo` to CTest. If Python is not on PATH, select an existing
+interpreter at configure time, for example
+`-DPython3_EXECUTABLE=C:/msys64/ucrt64/bin/python.exe` for an MSYS2 UCRT64 install.
+Configure with `-DBUILD_TESTING=OFF` to build only the launcher without Python.
+
+Tests use private loopback ports, temporary installations and fake children;
+they do not contact a running Holder backend, access user data or show dialogs.
+They cover response validation, fragmentation, redirects, slow/silent peers,
+asynchronous request cleanup, healthy reuse, backend startup and endpoint
+collisions. Windows CI runs them before uploading the launcher artifact.
+
+### Startup behavior
+
+The launcher probes `http://127.0.0.1:11499/ping` directly, without a proxy or
+redirects, and requires HTTP 200 with exactly `pong` as the decoded body. This
+is a liveness check, not authentication or a daemon-version compatibility check.
+WinHTTP handles HTTP framing, including Content-Length, connection-close and
+chunked responses. Headers are limited to 8 KiB, reads use an 8 KiB buffer, and
+any body that differs from `pong` is rejected. Each probe uses one monotonic
+one-second deadline across sending, receiving headers and reading the body.
+
+An incompatible response reports an endpoint conflict and prevents desktop
+startup. If found on the initial probe, it also prevents backend startup. An
+unavailable backend is started hidden and polled as before. The overall startup
+loop still uses 32 attempts with 250 ms sleeps; it does not yet have the macOS
+60-second shared startup budget or early backend-exit diagnostics.
+
 ### Diagnostics
 
 Failures are reported with a native Windows message box. The launcher also

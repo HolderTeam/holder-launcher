@@ -21,6 +21,11 @@ jobs:
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Set up Python for tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Configure CMake
         shell: pwsh
         run: |
@@ -29,10 +34,14 @@ jobs:
             -B build `
             -G Ninja `
             -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-            -DCMAKE_CXX_COMPILER=cl
+            -DCMAKE_CXX_COMPILER=cl `
+            -DBUILD_TESTING=ON
 
-      - name: Build launcher
-        run: cmake --build build --target Holder --parallel
+      - name: Build launcher and tests
+        run: cmake --build build --parallel
+
+      - name: Test Windows probe and launcher
+        run: ctest --test-dir build --output-on-failure
 
       - name: Stage launcher artifact
         shell: pwsh
@@ -56,7 +65,7 @@ jobs:
             Select-Object FullName, Length |
             Sort-Object FullName
 
-      - name: Smoke-test staged launcher artifact
+      - name: Check staged launcher artifact integrity
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"

@@ -1,5 +1,6 @@
 #include <windows.h>
-#include <winhttp.h>
+
+#include "BackendProbe.h"
 
 #include <chrono>
 #include <filesystem>
@@ -9,11 +10,18 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+#include <cwchar>
+#include <iostream>
+#endif
 
 namespace {
 
-constexpr wchar_t kBackendHost[] = L"127.0.0.1";
-constexpr INTERNET_PORT kBackendPort = 11499;
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+std::uint16_t kBackendPort = 0;
+#else
+constexpr std::uint16_t kBackendPort = 11499;
+#endif
 constexpr int kHealthAttempts = 32;
 constexpr auto kHealthDelay = std::chrono::milliseconds(250);
 
@@ -105,8 +113,17 @@ void append_log(std::wstring_view message) {
 
 void show_error(std::wstring_view message) {
   append_log(message);
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  std::wcerr << message << L"\n";
+#else
   const std::wstring text(message);
   MessageBoxW(nullptr, text.c_str(), L"Holder", MB_OK | MB_ICONERROR);
+#endif
+}
+
+void show_backend_collision() {
+  show_error(L"The service at 127.0.0.1:11499 did not return the expected Holder ping response.\n\n"
+             L"Close the conflicting service and try again. Holder has not opened the desktop.");
 }
 
 bool file_exists(const std::filesystem::path& path) {
@@ -133,72 +150,6 @@ InstallLayout resolve_layout() {
       self_dir / L"holder-desktop.exe",
   };
   return side_by_side_layout;
-}
-
-bool backend_ping() {
-  HINTERNET session = WinHttpOpen(
-      L"Holder Launcher/1.0",
-      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-      WINHTTP_NO_PROXY_NAME,
-      WINHTTP_NO_PROXY_BYPASS,
-      0
-  );
-  if (!session) {
-    return false;
-  }
-
-  HINTERNET connect = WinHttpConnect(session, kBackendHost, kBackendPort, 0);
-  if (!connect) {
-    WinHttpCloseHandle(session);
-    return false;
-  }
-
-  HINTERNET request = WinHttpOpenRequest(
-      connect,
-      L"GET",
-      L"/ping",
-      nullptr,
-      WINHTTP_NO_REFERER,
-      WINHTTP_DEFAULT_ACCEPT_TYPES,
-      0
-  );
-  if (!request) {
-    WinHttpCloseHandle(connect);
-    WinHttpCloseHandle(session);
-    return false;
-  }
-
-  DWORD timeout_ms = 1000;
-  WinHttpSetTimeouts(request, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-
-  bool ok = false;
-  if (WinHttpSendRequest(
-          request,
-          WINHTTP_NO_ADDITIONAL_HEADERS,
-          0,
-          WINHTTP_NO_REQUEST_DATA,
-          0,
-          0,
-          0
-      ) &&
-      WinHttpReceiveResponse(request, nullptr)) {
-    DWORD status_code = 0;
-    DWORD status_size = sizeof(status_code);
-    ok = WinHttpQueryHeaders(
-             request,
-             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-             WINHTTP_HEADER_NAME_BY_INDEX,
-             &status_code,
-             &status_size,
-             WINHTTP_NO_HEADER_INDEX
-         ) &&
-         status_code == 200;
-  }
-
-  WinHttpCloseHandle(request);
-  WinHttpCloseHandle(connect);
-  WinHttpCloseHandle(session);
-  return ok;
 }
 
 bool start_process(
@@ -239,14 +190,15 @@ bool start_process(
   return true;
 }
 
-bool wait_for_backend_health() {
+holder::ProbeResult wait_for_backend_health() {
   for (int attempt = 0; attempt < kHealthAttempts; ++attempt) {
-    if (backend_ping()) {
-      return true;
+    const auto result = holder::backend_ping(kBackendPort, std::chrono::seconds(1));
+    if (result != holder::ProbeResult::unavailable) {
+      return result;
     }
     std::this_thread::sleep_for(kHealthDelay);
   }
-  return false;
+  return holder::ProbeResult::unavailable;
 }
 
 int run_launcher() {
@@ -262,7 +214,12 @@ int run_launcher() {
     return 1;
   }
 
-  if (!backend_ping()) {
+  const auto initial_probe = holder::backend_ping(kBackendPort, std::chrono::seconds(1));
+  if (initial_probe == holder::ProbeResult::incompatible) {
+    show_backend_collision();
+    return 1;
+  }
+  if (initial_probe == holder::ProbeResult::unavailable) {
     append_log(L"Backend is not healthy; starting holderd.exe");
     std::wstring backend_error;
     if (!start_process(layout.backend_exe, layout.root_dir, CREATE_NO_WINDOW, &backend_error)) {
@@ -270,7 +227,12 @@ int run_launcher() {
       return 1;
     }
 
-    if (!wait_for_backend_health()) {
+    const auto readiness = wait_for_backend_health();
+    if (readiness == holder::ProbeResult::incompatible) {
+      show_backend_collision();
+      return 1;
+    }
+    if (readiness != holder::ProbeResult::healthy) {
       show_error(
           L"Holder backend did not become ready.\n\n"
           L"Try starting Holder Backend from the Start Menu, or check:\n\n" +
@@ -293,7 +255,15 @@ int run_launcher() {
 
 } // namespace
 
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+int wmain(int argc, wchar_t** argv) {
+  if (argc != 2) return 2;
+  const auto port = std::wcstoul(argv[1], nullptr, 10);
+  if (port == 0 || port > 65535) return 2;
+  kBackendPort = static_cast<std::uint16_t>(port);
+#else
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+#endif
   try {
     return run_launcher();
   } catch (const std::exception& e) {
