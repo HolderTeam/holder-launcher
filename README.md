@@ -142,6 +142,29 @@ systems, including when compiled with an older SDK. This does not establish a
 minimum macOS version for the full app: the backend, frontend, and their bundled
 dependencies also need compatible builds and testing on the target system.
 
+### Tests
+
+The default macOS build includes native backend-probe tests:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Tests run controlled servers on automatically allocated loopback ports. They
+do not start Holder services, access user data, or display dialogs. They cover
+valid and fragmented responses, malformed responses, connection failure/reset,
+response size limits, and silent/slow peers. macOS CI runs them before uploading
+the launcher. Configure with `-DBUILD_TESTING=OFF` for a launcher-only build.
+
+The production probe uses `127.0.0.1:11499` and requires HTTP 200 with the exact
+`pong` body. It accepts Content-Length or connection-close framing; transfer
+encoding is rejected because the daemon's `/ping` contract does not use it.
+Responses are limited to 8 KiB, with a one-second deadline covering connection,
+request, and response. This is a liveness check, not authentication. The overall
+startup retry loop still has a separate budget; one second is the per-probe bound.
+
 ### Diagnostics
 
 Failures are reported with a native macOS alert. The launcher also appends a

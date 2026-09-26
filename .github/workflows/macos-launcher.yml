@@ -25,8 +25,11 @@ jobs:
             -B build \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
-      - name: Build launcher
-        run: cmake --build build --target Holder --parallel
+      - name: Build launcher and tests
+        run: cmake --build build --parallel
+
+      - name: Test macOS backend probe
+        run: ctest --test-dir build --output-on-failure
 
       - name: Stage launcher artifact
         run: |
@@ -48,7 +51,7 @@ jobs:
 
           find "${stage_dir}" -type f -maxdepth 2 -print | sort
 
-      - name: Smoke-test staged launcher artifact
+      - name: Check staged launcher artifact integrity
         run: |
           set -euo pipefail
 

@@ -1,11 +1,9 @@
+#include "BackendProbe.h"
+
 #include <Availability.h>
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <mach-o/dyld.h>
-#include <netinet/in.h>
 #include <spawn.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -23,7 +21,6 @@ extern char** environ;
 
 namespace {
 
-constexpr const char* kBackendHost = "127.0.0.1";
 constexpr uint16_t kBackendPort = 11499;
 constexpr int kHealthAttempts = 32;
 constexpr auto kHealthDelay = std::chrono::milliseconds(250);
@@ -124,50 +121,7 @@ InstallLayout resolve_layout() {
 }
 
 bool backend_ping() {
-  const int sock = socket(AF_INET, SOCK_STREAM, 0);
-  if (sock < 0) {
-    return false;
-  }
-
-  timeval timeout{};
-  timeout.tv_sec = 1;
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(kBackendPort);
-  if (inet_pton(AF_INET, kBackendHost, &addr.sin_addr) != 1) {
-    close(sock);
-    return false;
-  }
-
-  if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    close(sock);
-    return false;
-  }
-
-  constexpr std::string_view request =
-      "GET /ping HTTP/1.1\r\n"
-      "Host: 127.0.0.1:11499\r\n"
-      "Connection: close\r\n"
-      "\r\n";
-
-  if (send(sock, request.data(), request.size(), 0) < 0) {
-    close(sock);
-    return false;
-  }
-
-  char buffer[128] = {};
-  const ssize_t received = recv(sock, buffer, sizeof(buffer) - 1, 0);
-  close(sock);
-
-  if (received <= 0) {
-    return false;
-  }
-
-  return std::string_view(buffer, static_cast<size_t>(received)).find("HTTP/1.1 200") !=
-         std::string_view::npos;
+  return holder::backend_ping(kBackendPort, std::chrono::seconds(1));
 }
 
 void configure_runtime_environment(const std::filesystem::path& working_dir) {
