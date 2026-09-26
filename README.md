@@ -126,21 +126,39 @@ cmake --build build
 
 The output executable is `build/Holder`.
 
-To prepare a launcher build for testing on macOS 11 (Big Sur), use a separate
-build directory and an explicit deployment target:
+The full app's minimum macOS version is not yet established. Testing an older
+system requires compatible builds of the launcher, backend, frontend, and all
+bundled libraries; changing the launcher's deployment target alone is insufficient.
+
+### Tests
+
+The default macOS build includes component and launcher integration tests.
+Python 3 is required (standard library only).
 
 ```sh
-cmake -S . -B build-bigsur -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-cmake --build build-bigsur
+ctest --test-dir build --output-on-failure
 ```
 
-Build for the test machine's architecture (add `-DCMAKE_OSX_ARCHITECTURES=x86_64`
-for an Intel Mac when building on Apple Silicon). The launcher uses the standard
-spawn working-directory action on macOS 26+ and the older extension on earlier
-systems, including when compiled with an older SDK. This does not establish a
-minimum macOS version for the full app: the backend, frontend, and their bundled
-dependencies also need compatible builds and testing on the target system.
+Tests use temporary installations, fake child programs, and private loopback
+ports; they do not access your Holder data or show dialogs. macOS CI runs them
+before artifact upload. Configure with `-DBUILD_TESTING=OFF` to build only the
+launcher without requiring Python.
+
+### Startup behavior
+
+The launcher checks `127.0.0.1:11499` for HTTP 200 with body `pong`. It allows
+up to 60 seconds for backend readiness and opens the desktop as soon as the
+backend responds. An early backend exit is reported after a final health check.
+Exit code 2 can mean another instance holds the daemon lock, so the launcher
+keeps waiting within that same budget. An incompatible ping response is reported
+without starting another daemon. A timeout does not kill or restart the backend.
+
+Layout is determined by the resolved launcher location, not the working
+directory. App bundles use `Contents/Resources` as the runtime root; developer
+installs use the parent of `bin`. Missing bundle components produce an error
+rather than falling back to adjacent executables. Bundled GTK runtime variables
+are applied only to the desktop; the backend inherits the launcher's environment.
+Command-line arguments and file/URL activation are not forwarded.
 
 ### Diagnostics
 
@@ -150,3 +168,9 @@ small log to:
 ```text
 ~/Library/Logs/Holder/launcher.log
 ```
+
+The log includes timestamps, launcher version, and startup timing, and rotates
+at 256 KiB with one `.1` backup. Errors also go to stderr if an alert cannot be
+displayed. For backend failures, check `~/.local/share/holder/server/logs/server.log`
+(or `$XDG_DATA_HOME/holder/server/logs/server.log` when an absolute override is set).
+If a bundled executable is missing, restore or reinstall the complete app bundle.
