@@ -42,6 +42,11 @@ bin/
   holderctl.exe
 ```
 
+A child `bin` entry selects the installer layout, even when files are missing.
+Otherwise, a launcher inside a directory named `bin` (case-insensitive) uses the
+developer layout; all other locations use the installer layout. Missing files
+are reported in that layout. Restore the complete installation to recover.
+
 ### Build
 
 From a Visual Studio developer shell:

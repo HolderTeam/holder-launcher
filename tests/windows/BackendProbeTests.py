@@ -2,6 +2,7 @@
 import os
 import ctypes
 from ctypes import wintypes
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import socket
@@ -22,6 +23,22 @@ KERNEL.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 KERNEL.WaitForSingleObject.restype = wintypes.DWORD
 KERNEL.CloseHandle.argtypes = [wintypes.HANDLE]
 KERNEL.CloseHandle.restype = wintypes.BOOL
+KERNEL.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                              wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+KERNEL.CreateFileW.restype = wintypes.HANDLE
+
+
+@contextmanager
+def locked_executable(path):
+    # A sharing violation exercises CreateProcess failure without the OS loader
+    # dialogs that malformed/16-bit executables can display before main runs.
+    handle = KERNEL.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield
+    finally:
+        KERNEL.CloseHandle(handle)
 
 
 def fixture_running(pid, wait_ms=0):
@@ -210,6 +227,7 @@ class LauncherTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="holder windows ")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.launcher_path = self.root / "Holder.exe"
         (self.root / "bin").mkdir()
         shutil.copy2(LAUNCHER, self.root / "Holder.exe")
         for name in ("holderd.exe", "holder-desktop.exe"):
@@ -229,7 +247,7 @@ class LauncherTests(unittest.TestCase):
 
     def launch(self, port, success, budget=5000, error="expected Holder ping response"):
         start = time.monotonic()
-        result = subprocess.run([self.root / "Holder.exe", str(port), str(budget)], cwd=self.root.parent,
+        result = subprocess.run([self.launcher_path, str(port), str(budget)], cwd=self.root.parent,
                                 env=self.env, capture_output=True, text=True, timeout=12)
         self.elapsed = time.monotonic() - start
         self.assertEqual(result.returncode, 0 if success else 1, result.stdout + result.stderr)
@@ -330,6 +348,62 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(list(self.root.glob("holder-desktop.exe.*.started"))), 2)
         self.assertTrue(fixture_running(int((self.root / "winner.ready").read_text())))
         self.assertIn("exit code 2", (self.root / "local" / "holder" / "launcher.log").read_text())
+
+    def test_incomplete_package_ignores_adjacent_decoys(self):
+        (self.root / "bin" / "holder-desktop.exe").unlink()
+        for name in ("holderd.exe", "holder-desktop.exe"):
+            shutil.copy2(CHILD, self.root / name)
+        with Server([(0, PONG)]) as server:
+            result = self.launch(server.port, False, error="Holder desktop app was not found")
+            self.assertEqual(server.requests, [])
+        self.assertIn(str(self.root / "bin" / "holder-desktop.exe"), result.stderr)
+        self.assertFalse(self.backend.exists())
+
+    def test_missing_bin_ignores_adjacent_decoys(self):
+        for name in ("holderd.exe", "holder-desktop.exe"):
+            (self.root / "bin" / name).replace(self.root / name)
+        (self.root / "bin").rmdir()
+        with Server([(0, PONG)]) as server:
+            result = self.launch(server.port, False, error="Holder backend was not found")
+            self.assertEqual(server.requests, [])
+        self.assertIn(str(self.root / "bin" / "holderd.exe"), result.stderr)
+        self.assertFalse(self.backend.exists())
+
+    def test_developer_layout_uses_parent_working_directory(self):
+        self.launcher_path = self.root / "bin" / "Holder.exe"
+        (self.root / "Holder.exe").replace(self.launcher_path)
+        with Server([(0, PONG)], start_when=self.backend) as server:
+            self.launch(server.port, True)
+        # Both fixture markers are written into their current working directory.
+        self.assertTrue(self.backend.exists())
+        self.assertTrue(self.desktop.exists())
+        self.assertFalse((self.root / "bin" / "holderd.exe.started").exists())
+
+    def test_unicode_apostrophe_and_spaces(self):
+        self.root = self.root / "Holder \u96ea's space"
+        (self.root / "bin").mkdir(parents=True)
+        self.launcher_path = self.root / "Renamed.exe"
+        shutil.copy2(LAUNCHER, self.launcher_path)
+        for name in ("holderd.exe", "holder-desktop.exe"):
+            shutil.copy2(CHILD, self.root / "bin" / name)
+        self.backend = self.root / "holderd.exe.started"
+        self.desktop = self.root / "holder-desktop.exe.started"
+        with Server([(0, PONG)], start_when=self.backend) as server:
+            self.launch(server.port, True)
+        self.assertTrue(self.backend.exists())
+
+    def test_backend_spawn_failure(self):
+        with locked_executable(self.root / "bin" / "holderd.exe"), socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            result = self.launch(reserved.getsockname()[1], False, error="Failed to start")
+        self.assertIn(str(self.root / "bin" / "holderd.exe"), result.stderr)
+        self.assertFalse(self.backend.exists())
+
+    def test_desktop_spawn_failure(self):
+        with locked_executable(self.root / "bin" / "holder-desktop.exe"), Server([(0, PONG)]) as server:
+            result = self.launch(server.port, False, error="Failed to start")
+        self.assertIn(str(self.root / "bin" / "holder-desktop.exe"), result.stderr)
+        self.assertFalse(self.backend.exists())
 
 
 if __name__ == "__main__":

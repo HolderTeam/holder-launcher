@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include "BackendStartup.h"
+#include "InstallLayout.h"
 
 #include <chrono>
 #include <filesystem>
@@ -34,12 +35,6 @@ struct ProcessHandle {
   ProcessHandle(const ProcessHandle&) = delete;
   ProcessHandle& operator=(const ProcessHandle&) = delete;
   ~ProcessHandle() { if (value) CloseHandle(value); }
-};
-
-struct InstallLayout {
-  std::filesystem::path root_dir;
-  std::filesystem::path backend_exe;
-  std::filesystem::path desktop_exe;
 };
 
 std::wstring last_error_message(DWORD error_code) {
@@ -132,32 +127,6 @@ void show_error(std::wstring_view message) {
 #endif
 }
 
-bool file_exists(const std::filesystem::path& path) {
-  std::error_code ec;
-  return std::filesystem::is_regular_file(path, ec);
-}
-
-InstallLayout resolve_layout() {
-  const auto self = executable_path();
-  const auto self_dir = self.parent_path();
-
-  InstallLayout root_layout{
-      self_dir,
-      self_dir / L"bin" / L"holderd.exe",
-      self_dir / L"bin" / L"holder-desktop.exe",
-  };
-  if (file_exists(root_layout.backend_exe) && file_exists(root_layout.desktop_exe)) {
-    return root_layout;
-  }
-
-  InstallLayout side_by_side_layout{
-      self_dir.parent_path(),
-      self_dir / L"holderd.exe",
-      self_dir / L"holder-desktop.exe",
-  };
-  return side_by_side_layout;
-}
-
 bool start_process(
     const std::filesystem::path& exe,
     const std::filesystem::path& working_dir,
@@ -199,15 +168,11 @@ bool start_process(
 }
 
 int run_launcher() {
-  const auto layout = resolve_layout();
+  const auto layout = holder::resolve_layout(executable_path());
   append_log(L"Holder launcher starting");
 
-  if (!file_exists(layout.backend_exe)) {
-    show_error(L"Holder backend was not found:\n\n" + layout.backend_exe.wstring());
-    return 1;
-  }
-  if (!file_exists(layout.desktop_exe)) {
-    show_error(L"Holder desktop app was not found:\n\n" + layout.desktop_exe.wstring());
+  if (const auto error = holder::validate_layout(layout); !error.empty()) {
+    show_error(error);
     return 1;
   }
 
