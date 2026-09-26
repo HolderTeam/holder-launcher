@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +24,16 @@ extern char** environ;
 
 namespace {
 
-constexpr uint16_t kBackendPort = 11499;
+uint16_t backend_port() {
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  // Only the test executable accepts an isolated endpoint; never enabled on Holder.
+  const char* port = std::getenv("HOLDER_TEST_PORT");
+  if (!port) throw std::runtime_error("Missing integration test port");
+  return static_cast<uint16_t>(std::stoi(port));
+#else
+  return 11499;
+#endif
+}
 
 std::filesystem::path executable_path() {
   std::vector<char> buffer(4096);
@@ -82,10 +92,14 @@ std::string apple_script_quote(std::string_view value) {
 
 void show_error(std::string_view message) {
   append_log(message);
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  std::fprintf(stderr, "%.*s\n", static_cast<int>(message.size()), message.data());
+#else
   const std::string script =
       "display alert \"Holder\" message " + apple_script_quote(message);
   const std::string command = "osascript -e " + shell_quote(script);
   (void)std::system(command.c_str());
+#endif
 }
 
 void configure_runtime_environment(const std::filesystem::path& working_dir) {
@@ -202,7 +216,7 @@ int run_launcher() {
   const holder::StartupActions actions{
       [] { return holder::StartupClock::now(); },
       [](auto delay) { std::this_thread::sleep_for(delay); },
-      [](auto timeout) { return holder::backend_ping(kBackendPort, timeout); },
+      [](auto timeout) { return holder::backend_ping(backend_port(), timeout); },
       [&] {
         append_log("Backend is not healthy; starting holderd (60-second readiness budget)");
         std::string error;

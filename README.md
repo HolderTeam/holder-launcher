@@ -126,69 +126,35 @@ cmake --build build
 
 The output executable is `build/Holder`.
 
-To prepare a launcher build for testing on macOS 11 (Big Sur), use a separate
-build directory and an explicit deployment target:
-
-```sh
-cmake -S . -B build-bigsur -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-cmake --build build-bigsur
-```
-
-Build for the test machine's architecture (add `-DCMAKE_OSX_ARCHITECTURES=x86_64`
-for an Intel Mac when building on Apple Silicon). The launcher uses the standard
-spawn working-directory action on macOS 26+ and the older extension on earlier
-systems, including when compiled with an older SDK. This does not establish a
-minimum macOS version for the full app: the backend, frontend, and their bundled
-dependencies also need compatible builds and testing on the target system.
+The full app's minimum macOS version is not yet established. Testing an older
+system requires compatible builds of the launcher, backend, frontend, and all
+bundled libraries; changing the launcher's deployment target alone is insufficient.
 
 ### Tests
 
-The default macOS build includes native backend-probe and installation-layout tests:
+The default macOS build includes component and launcher integration tests.
+Python 3 is required (standard library only).
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Tests run controlled servers on automatically allocated loopback ports. They
-do not start Holder services, access user data, or display dialogs. They cover
-valid and fragmented responses, malformed responses, connection failure/reset,
-response size limits, and silent/slow peers. macOS CI runs them before uploading
-the launcher. Configure with `-DBUILD_TESTING=OFF` for a launcher-only build.
+Tests use temporary installations, fake child programs, and private loopback
+ports; they do not access your Holder data or show dialogs. macOS CI runs them
+before artifact upload. Configure with `-DBUILD_TESTING=OFF` to build only the
+launcher without requiring Python.
 
-Layout tests use temporary directories to check complete and incomplete bundles,
-developer installs, competing adjacent binaries, missing-file diagnostics, and
-paths containing spaces, Unicode, and apostrophes. Layout selection uses the
-resolved launcher location, independently of the current working directory:
-`*.app/Contents/MacOS/Holder` selects `Contents/Resources` as the runtime root
-and its `bin` directory for both children. Other locations select adjacent
-children and the parent of their directory as the runtime root. A bundle stays
-selected even when its Resources directory or either child is missing; it never
-falls back to adjacent executables. Renamed `.app` bundles are supported.
+### Startup behavior
 
-The production probe uses `127.0.0.1:11499` and requires HTTP 200 with the exact
-`pong` body. It accepts Content-Length or connection-close framing; transfer
-encoding is rejected because the daemon's `/ping` contract does not use it.
-Responses are limited to 8 KiB, with a one-second deadline covering connection,
-request, and response. This is a liveness check, not authentication.
+The launcher checks `127.0.0.1:11499` for HTTP 200 with body `pong`. It allows
+up to 60 seconds for backend readiness and opens the desktop as soon as the
+backend responds. An early backend exit is reported after a final health check;
+a timeout does not kill or restart the backend.
 
-macOS startup gives the backend up to 60 seconds to become ready, including the
-initial probe and subsequent retries. It opens the desktop immediately on a
-successful probe, with at most 250 ms between attempts. Each probe and sleep is
-limited to the remaining budget. The budget begins after installation validation;
-it is a readiness deadline, not a timeout for OS process creation or GUI alerts.
-
-If the backend child exits early, the launcher reaps it and rechecks health once
-in case another launcher started a healthy daemon. Otherwise it reports the exit
-code or signal promptly. A timeout does not kill the backend or restart it.
-Concurrent launches whose winning daemon is still starting at that final check
-remain a follow-up case.
-
-Startup tests use a fake clock to cover slow cold starts, deadline boundaries,
-spawn failure, and healthy concurrent-winner reuse without waiting a real minute.
-Native child-process tests also verify nonblocking status checks and exit reaping.
+Layout is determined by the resolved launcher location, not the working
+directory. App bundles use `Contents/Resources` as the runtime root; developer
+installs use the parent of `bin`. Missing bundle components produce an error
+rather than falling back to adjacent executables.
 
 ### Diagnostics
 
