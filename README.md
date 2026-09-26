@@ -1,13 +1,7 @@
 # holder-launcher
 
-App launcher for Holder. 
-
-Holder-daemon aka holderd (the backend server) runs in the background,
-the reference GTK implementation (holder-desktop) runs in the frontend
-and expects holderd to be listening.
-
-To make a friendly user experience. The launcher checks the backend is up,
-starts it if needed, then hands the user over to the frontend.
+Starts the Holder backend (`holderd`) if needed, waits for it to respond, then
+opens `holder-desktop`.
 
 ## Windows
 
@@ -48,6 +42,11 @@ bin/
   holderctl.exe
 ```
 
+A child `bin` entry selects the installer layout, even when files are missing.
+Otherwise, a launcher inside a directory named `bin` (case-insensitive) uses the
+developer layout; all other locations use the installer layout. Missing files
+are reported in that layout. Restore the complete installation to recover.
+
 ### Build
 
 From a Visual Studio developer shell:
@@ -61,8 +60,7 @@ The output executable is `build/Holder.exe`.
 
 ### Tests
 
-The default Windows build includes native WinHTTP and launcher-entrypoint tests.
-Python 3 is required for the test harness (standard library only):
+Tests require Python 3 (standard library only):
 
 ```powershell
 ctest --test-dir build --output-on-failure
@@ -76,25 +74,15 @@ Configure with `-DBUILD_TESTING=OFF` to build only the launcher without Python.
 
 Tests use private loopback ports, temporary installations and fake children;
 they do not contact a running Holder backend, access user data or show dialogs.
-They cover response validation, fragmentation, redirects, slow/silent peers,
-asynchronous request cleanup, healthy reuse, backend startup and endpoint
-collisions. Windows CI runs them before uploading the launcher artifact.
+CI runs them before artifact upload.
 
 ### Startup behavior
 
-The launcher probes `http://127.0.0.1:11499/ping` directly, without a proxy or
-redirects, and requires HTTP 200 with exactly `pong` as the decoded body. This
-is a liveness check, not authentication or a daemon-version compatibility check.
-WinHTTP handles HTTP framing, including Content-Length, connection-close and
-chunked responses. Headers are limited to 8 KiB, reads use an 8 KiB buffer, and
-any body that differs from `pong` is rejected. Each probe uses one monotonic
-one-second deadline across sending, receiving headers and reading the body.
-
-An incompatible response reports an endpoint conflict and prevents desktop
-startup. If found on the initial probe, it also prevents backend startup. An
-unavailable backend is started hidden and polled as before. The overall startup
-loop still uses 32 attempts with 250 ms sleeps; it does not yet have the macOS
-60-second shared startup budget or early backend-exit diagnostics.
+The launcher checks `http://127.0.0.1:11499/ping` directly, without proxies or
+redirects, and expects HTTP 200 with body `pong`. It allows up to 60 seconds for
+backend readiness and opens the desktop as soon as the backend responds.
+Conflicting services and early backend exits produce an error. Concurrent
+launches can reuse the same backend; a timeout does not kill or restart it.
 
 ### Diagnostics
 
@@ -163,9 +151,7 @@ cmake --build build
 
 The output executable is `build/Holder`.
 
-The full app's minimum macOS version is not yet established. Testing an older
-system requires compatible builds of the launcher, backend, frontend, and all
-bundled libraries; changing the launcher's deployment target alone is insufficient.
+The full app's minimum supported macOS version is not yet established.
 
 ### Tests
 
@@ -185,10 +171,9 @@ launcher without requiring Python.
 
 The launcher checks `127.0.0.1:11499` for HTTP 200 with body `pong`. It allows
 up to 60 seconds for backend readiness and opens the desktop as soon as the
-backend responds. An early backend exit is reported after a final health check.
-Exit code 2 can mean another instance holds the daemon lock, so the launcher
-keeps waiting within that same budget. An incompatible ping response is reported
-without starting another daemon. A timeout does not kill or restart the backend.
+backend responds. Conflicting services and early backend exits produce an error.
+Concurrent launches can reuse the same backend; a timeout does not kill or
+restart it.
 
 Layout is determined by the resolved launcher location, not the working
 directory. App bundles use `Contents/Resources` as the runtime root; developer
@@ -211,3 +196,8 @@ at 256 KiB with one `.1` backup. Errors also go to stderr if an alert cannot be
 displayed. For backend failures, check `~/.local/share/holder/server/logs/server.log`
 (or `$XDG_DATA_HOME/holder/server/logs/server.log` when an absolute override is set).
 If a bundled executable is missing, restore or reinstall the complete app bundle.
+
+## Development status
+
+Implementation notes, validation history and remaining release work are tracked
+in the [release readiness plan](https://github.com/HolderTeam/holder-planning/blob/main/current/release/HOLDER_LAUNCHER_RELEASE_READINESS_PLAN.md).
