@@ -1,4 +1,5 @@
 #include "BackendProbe.h"
+#include "InstallLayout.h"
 
 #include <Availability.h>
 #include <errno.h>
@@ -24,12 +25,6 @@ namespace {
 constexpr uint16_t kBackendPort = 11499;
 constexpr int kHealthAttempts = 32;
 constexpr auto kHealthDelay = std::chrono::milliseconds(250);
-
-struct InstallLayout {
-  std::filesystem::path root_dir;
-  std::filesystem::path backend_exe;
-  std::filesystem::path desktop_exe;
-};
 
 std::filesystem::path executable_path() {
   std::vector<char> buffer(4096);
@@ -92,32 +87,6 @@ void show_error(std::string_view message) {
       "display alert \"Holder\" message " + apple_script_quote(message);
   const std::string command = "osascript -e " + shell_quote(script);
   (void)std::system(command.c_str());
-}
-
-bool file_exists(const std::filesystem::path& path) {
-  std::error_code ec;
-  return std::filesystem::is_regular_file(path, ec);
-}
-
-InstallLayout resolve_layout() {
-  const auto self = executable_path();
-  const auto self_dir = self.parent_path();
-
-  InstallLayout app_layout{
-      self_dir.parent_path() / "Resources",
-      self_dir.parent_path() / "Resources" / "bin" / "holderd",
-      self_dir.parent_path() / "Resources" / "bin" / "holder-desktop",
-  };
-  if (file_exists(app_layout.backend_exe) && file_exists(app_layout.desktop_exe)) {
-    return app_layout;
-  }
-
-  InstallLayout side_by_side_layout{
-      self_dir.parent_path(),
-      self_dir / "holderd",
-      self_dir / "holder-desktop",
-  };
-  return side_by_side_layout;
 }
 
 bool backend_ping() {
@@ -235,15 +204,11 @@ bool wait_for_backend_health() {
 }
 
 int run_launcher() {
-  const auto layout = resolve_layout();
+  const auto layout = holder::resolve_layout(executable_path());
   append_log("Holder launcher starting");
 
-  if (!file_exists(layout.backend_exe)) {
-    show_error("Holder backend was not found:\n\n" + layout.backend_exe.string());
-    return 1;
-  }
-  if (!file_exists(layout.desktop_exe)) {
-    show_error("Holder desktop app was not found:\n\n" + layout.desktop_exe.string());
+  if (const auto error = holder::validate_layout(layout); !error.empty()) {
+    show_error(error);
     return 1;
   }
 

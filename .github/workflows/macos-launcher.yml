@@ -28,7 +28,7 @@ jobs:
       - name: Build launcher and tests
         run: cmake --build build --parallel
 
-      - name: Test macOS backend probe
+      - name: Test macOS launcher components
         run: ctest --test-dir build --output-on-failure
 
       - name: Stage launcher artifact

@@ -144,7 +144,7 @@ dependencies also need compatible builds and testing on the target system.
 
 ### Tests
 
-The default macOS build includes native backend-probe tests:
+The default macOS build includes native backend-probe and installation-layout tests:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -157,6 +157,16 @@ do not start Holder services, access user data, or display dialogs. They cover
 valid and fragmented responses, malformed responses, connection failure/reset,
 response size limits, and silent/slow peers. macOS CI runs them before uploading
 the launcher. Configure with `-DBUILD_TESTING=OFF` for a launcher-only build.
+
+Layout tests use temporary directories to check complete and incomplete bundles,
+developer installs, competing adjacent binaries, missing-file diagnostics, and
+paths containing spaces, Unicode, and apostrophes. Layout selection uses the
+resolved launcher location, independently of the current working directory:
+`*.app/Contents/MacOS/Holder` selects `Contents/Resources` as the runtime root
+and its `bin` directory for both children. Other locations select adjacent
+children and the parent of their directory as the runtime root. A bundle stays
+selected even when its Resources directory or either child is missing; it never
+falls back to adjacent executables. Renamed `.app` bundles are supported.
 
 The production probe uses `127.0.0.1:11499` and requires HTTP 200 with the exact
 `pong` body. It accepts Content-Length or connection-close framing; transfer
