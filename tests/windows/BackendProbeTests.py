@@ -1,5 +1,7 @@
 """Native WinHTTP and actual-entrypoint tests; private ports, no GUI or real Holder."""
 import os
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 import shutil
 import socket
@@ -13,11 +15,35 @@ import unittest
 PROBE, LAUNCHER, CHILD = [Path(sys.argv.pop(1)).resolve() for _ in range(3)]
 PONG = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong"
 
+KERNEL = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+KERNEL.OpenProcess.restype = wintypes.HANDLE
+KERNEL.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+KERNEL.WaitForSingleObject.restype = wintypes.DWORD
+KERNEL.CloseHandle.argtypes = [wintypes.HANDLE]
+KERNEL.CloseHandle.restype = wintypes.BOOL
+
+
+def fixture_running(pid, wait_ms=0):
+    handle = KERNEL.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE only
+    if not handle:
+        if ctypes.get_last_error() == 87:  # process already exited
+            return False
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = KERNEL.WaitForSingleObject(handle, wait_ms)
+        if result not in (0, 258):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return result == 258
+    finally:
+        KERNEL.CloseHandle(handle)
+
 
 class Server:
-    def __init__(self, chunks=(), start_when=None):
+    def __init__(self, chunks=(), start_when=None, start_delay=0):
         self.chunks = chunks
         self.start_when = start_when
+        self.start_delay = start_delay
         self.stop = threading.Event()
         self.socket = socket.socket()
         self.socket.bind(("127.0.0.1", 0))
@@ -39,6 +65,8 @@ class Server:
             while not self.start_when.exists():
                 if self.stop.wait(.01):
                     return
+            if self.stop.wait(self.start_delay):
+                return
             self.socket.listen()
         while not self.stop.is_set():
             try:
@@ -189,10 +217,21 @@ class LauncherTests(unittest.TestCase):
         self.env = dict(os.environ, LOCALAPPDATA=str(self.root / "local"), TEMP=str(self.root))
         self.backend = self.root / "holderd.exe.started"
         self.desktop = self.root / "holder-desktop.exe.started"
+        for key in ("HOLDER_TEST_EXIT", "HOLDER_TEST_RACE"):
+            self.env.pop(key, None)
+        self.addCleanup(self.stop_children)
 
-    def launch(self, port, success):
-        result = subprocess.run([self.root / "Holder.exe", str(port)], cwd=self.root.parent,
+    def stop_children(self):
+        (self.root / "stop-fixtures").touch()
+        for marker in self.root.glob("*.exe.*.started"):
+            pid = int(marker.name.split(".")[-2])
+            self.assertFalse(fixture_running(pid, 3000), f"Fixture {pid} did not stop")
+
+    def launch(self, port, success, budget=5000, error="expected Holder ping response"):
+        start = time.monotonic()
+        result = subprocess.run([self.root / "Holder.exe", str(port), str(budget)], cwd=self.root.parent,
                                 env=self.env, capture_output=True, text=True, timeout=12)
+        self.elapsed = time.monotonic() - start
         self.assertEqual(result.returncode, 0 if success else 1, result.stdout + result.stderr)
         if success:
             deadline = time.monotonic() + 2
@@ -201,9 +240,10 @@ class LauncherTests(unittest.TestCase):
             self.assertTrue(self.desktop.exists())
         else:
             self.assertFalse(self.desktop.exists())
-            self.assertIn("expected Holder ping response", result.stderr)
-            self.assertIn("expected Holder ping response",
+            self.assertIn(error, result.stderr)
+            self.assertIn(error,
                           (self.root / "local" / "holder" / "launcher.log").read_text())
+        return result
 
     def test_healthy_reuse(self):
         with Server([(0, PONG)]) as server:
@@ -224,6 +264,72 @@ class LauncherTests(unittest.TestCase):
         with Server([(0, PONG.replace(b"pong", b"nope"))], start_when=self.backend) as server:
             self.launch(server.port, False)
         self.assertTrue(self.backend.exists())
+
+    def test_early_exit_is_reported(self):
+        self.env["HOLDER_TEST_EXIT"] = "7"
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            self.launch(reserved.getsockname()[1], False, error="exit code 7")
+        self.assertLess(self.elapsed, 4.5)
+        self.assertEqual(len(list(self.root.glob("holderd.exe.*.started"))), 1)
+
+    def test_exit_two_without_winner_retains_diagnostic(self):
+        self.env["HOLDER_TEST_EXIT"] = "2"
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            result = self.launch(reserved.getsockname()[1], False, budget=1800, error="exit code 2")
+        self.assertIn("within 1800 milliseconds", result.stderr)
+        self.assertGreaterEqual(self.elapsed, 1.7)
+        self.assertLess(self.elapsed, 2.8)
+        self.assertEqual(len(list(self.root.glob("holderd.exe.*.started"))), 1)
+
+    def test_silent_initial_probe_is_bounded_by_startup_budget(self):
+        with Server([(5, b"")]) as server:
+            self.launch(server.port, False, budget=200, error="within 200 milliseconds")
+        # Native timeout completion can leave a few milliseconds to spawn.
+        # The fake-clock suite checks exact exhaustion prevents spawning.
+        self.assertFalse(self.desktop.exists())
+        self.assertLess(self.elapsed, 1)
+
+    def test_timeout_leaves_backend_running(self):
+        with socket.socket() as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            self.launch(reserved.getsockname()[1], False, budget=1800, error="within 1800 milliseconds")
+        self.assertTrue(fixture_running(int(self.backend.read_text())))
+        self.assertFalse(self.desktop.exists())
+        self.assertLess(self.elapsed, 2.8)
+
+    def test_slow_successful_startup(self):
+        with Server([(0, PONG)], start_when=self.backend, start_delay=.6) as server:
+            self.launch(server.port, True)
+        self.assertTrue(fixture_running(int(self.backend.read_text())))
+        self.assertLess(self.elapsed, 5)
+
+    def test_two_concurrent_cold_launchers_reuse_winner(self):
+        self.env["HOLDER_TEST_RACE"] = "1"
+        with Server([(0, PONG)], start_when=self.root / "winner.ready") as server:
+            launchers = []
+            try:
+                for _ in range(2):
+                    launchers.append(subprocess.Popen(
+                        [self.root / "Holder.exe", str(server.port), "6000"], cwd=self.root.parent,
+                        env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+                for launcher in launchers:
+                    stdout, stderr = launcher.communicate(timeout=10)
+                    self.assertEqual(launcher.returncode, 0, stdout + stderr)
+            finally:
+                for launcher in launchers:
+                    if launcher.poll() is None:
+                        launcher.kill()
+                    launcher.communicate(timeout=3)
+        deadline = time.monotonic() + 2
+        while len(list(self.root.glob("holder-desktop.exe.*.started"))) < 2 and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(len(list(self.root.glob("holderd.exe.*.started"))), 2)
+        self.assertEqual(len(list(self.root.glob("loser.*"))), 1)
+        self.assertEqual(len(list(self.root.glob("holder-desktop.exe.*.started"))), 2)
+        self.assertTrue(fixture_running(int((self.root / "winner.ready").read_text())))
+        self.assertIn("exit code 2", (self.root / "local" / "holder" / "launcher.log").read_text())
 
 
 if __name__ == "__main__":

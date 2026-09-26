@@ -1,6 +1,6 @@
 #include <windows.h>
 
-#include "BackendProbe.h"
+#include "BackendStartup.h"
 
 #include <chrono>
 #include <filesystem>
@@ -22,8 +22,19 @@ std::uint16_t kBackendPort = 0;
 #else
 constexpr std::uint16_t kBackendPort = 11499;
 #endif
-constexpr int kHealthAttempts = 32;
-constexpr auto kHealthDelay = std::chrono::milliseconds(250);
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+std::chrono::milliseconds kStartupBudget = std::chrono::seconds(60);
+#else
+constexpr auto kStartupBudget = std::chrono::seconds(60);
+#endif
+
+struct ProcessHandle {
+  HANDLE value = nullptr;
+  ProcessHandle() = default;
+  ProcessHandle(const ProcessHandle&) = delete;
+  ProcessHandle& operator=(const ProcessHandle&) = delete;
+  ~ProcessHandle() { if (value) CloseHandle(value); }
+};
 
 struct InstallLayout {
   std::filesystem::path root_dir;
@@ -121,11 +132,6 @@ void show_error(std::wstring_view message) {
 #endif
 }
 
-void show_backend_collision() {
-  show_error(L"The service at 127.0.0.1:11499 did not return the expected Holder ping response.\n\n"
-             L"Close the conflicting service and try again. Holder has not opened the desktop.");
-}
-
 bool file_exists(const std::filesystem::path& path) {
   std::error_code ec;
   return std::filesystem::is_regular_file(path, ec);
@@ -156,7 +162,8 @@ bool start_process(
     const std::filesystem::path& exe,
     const std::filesystem::path& working_dir,
     DWORD creation_flags,
-    std::wstring* error
+    std::wstring* error,
+    HANDLE* retained_process = nullptr
 ) {
   std::wstring command_line = L"\"" + exe.wstring() + L"\"";
 
@@ -186,19 +193,9 @@ bool start_process(
   }
 
   CloseHandle(process.hThread);
-  CloseHandle(process.hProcess);
+  if (retained_process) *retained_process = process.hProcess;
+  else CloseHandle(process.hProcess);
   return true;
-}
-
-holder::ProbeResult wait_for_backend_health() {
-  for (int attempt = 0; attempt < kHealthAttempts; ++attempt) {
-    const auto result = holder::backend_ping(kBackendPort, std::chrono::seconds(1));
-    if (result != holder::ProbeResult::unavailable) {
-      return result;
-    }
-    std::this_thread::sleep_for(kHealthDelay);
-  }
-  return holder::ProbeResult::unavailable;
 }
 
 int run_launcher() {
@@ -214,32 +211,26 @@ int run_launcher() {
     return 1;
   }
 
-  const auto initial_probe = holder::backend_ping(kBackendPort, std::chrono::seconds(1));
-  if (initial_probe == holder::ProbeResult::incompatible) {
-    show_backend_collision();
+  ProcessHandle backend;
+  holder::StartupActions actions{
+      [] { return holder::StartupClock::now(); },
+      [](auto delay) { std::this_thread::sleep_for(delay); },
+      [](auto allowance) { return holder::backend_ping(kBackendPort, allowance); },
+      [&] {
+        append_log(L"Backend is not healthy; starting holderd.exe");
+        std::wstring error;
+        start_process(layout.backend_exe, layout.root_dir, CREATE_NO_WINDOW, &error, &backend.value);
+        return error;
+      },
+      [&] {
+        auto exit = holder::backend_exit_status(backend.value);
+        if (!exit.message.empty()) append_log(exit.message);
+        return exit;
+      },
+  };
+  if (const auto error = holder::ensure_backend(actions, kStartupBudget); !error.empty()) {
+    show_error(error + L"\n\nLauncher log:\n" + log_path().wstring());
     return 1;
-  }
-  if (initial_probe == holder::ProbeResult::unavailable) {
-    append_log(L"Backend is not healthy; starting holderd.exe");
-    std::wstring backend_error;
-    if (!start_process(layout.backend_exe, layout.root_dir, CREATE_NO_WINDOW, &backend_error)) {
-      show_error(backend_error);
-      return 1;
-    }
-
-    const auto readiness = wait_for_backend_health();
-    if (readiness == holder::ProbeResult::incompatible) {
-      show_backend_collision();
-      return 1;
-    }
-    if (readiness != holder::ProbeResult::healthy) {
-      show_error(
-          L"Holder backend did not become ready.\n\n"
-          L"Try starting Holder Backend from the Start Menu, or check:\n\n" +
-          log_path().wstring()
-      );
-      return 1;
-    }
   }
 
   append_log(L"Starting holder-desktop.exe");
@@ -257,10 +248,15 @@ int run_launcher() {
 
 #ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
 int wmain(int argc, wchar_t** argv) {
-  if (argc != 2) return 2;
+  if (argc != 2 && argc != 3) return 2;
   const auto port = std::wcstoul(argv[1], nullptr, 10);
   if (port == 0 || port > 65535) return 2;
   kBackendPort = static_cast<std::uint16_t>(port);
+  if (argc == 3) {
+    const auto milliseconds = std::wcstoul(argv[2], nullptr, 10);
+    if (milliseconds == 0 || milliseconds > 60000) return 2;
+    kStartupBudget = std::chrono::milliseconds(milliseconds);
+  }
 #else
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 #endif
