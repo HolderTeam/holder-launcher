@@ -80,7 +80,8 @@ Response parse_response(std::string_view data, bool eof) {
 }
 } // namespace
 
-bool backend_ping(uint16_t port, std::chrono::milliseconds timeout) {
+bool backend_ping(uint16_t port, std::chrono::milliseconds timeout, bool* incompatible_response) {
+  if (incompatible_response) *incompatible_response = false;
   const auto deadline = Clock::now() + timeout;
   Socket sock{socket(AF_INET, SOCK_STREAM, 0)};
   if (sock.fd < 0) return false;
@@ -120,8 +121,12 @@ bool backend_ping(uint16_t port, std::chrono::milliseconds timeout) {
     }
     response.append(buffer, static_cast<size_t>(count));
     const auto result = parse_response(response, count == 0);
-    if (result != Response::incomplete) return result == Response::valid;
+    if (result != Response::incomplete) {
+      if (incompatible_response) *incompatible_response = result == Response::invalid && !response.empty();
+      return result == Response::valid;
+    }
   }
+  if (incompatible_response) *incompatible_response = true;
   return false;
 }
 } // namespace holder

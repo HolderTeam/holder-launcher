@@ -9,20 +9,32 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 DRIVER = Path(sys.argv.pop(1)).resolve()
 FIXTURE = r'''
-import json, os, pathlib, socket, sys
+import json, os, pathlib, socket, sys, time, fcntl
 role = pathlib.Path(sys.argv[0]).name
 record = pathlib.Path(os.environ['HOLDER_TEST_RECORD']) / role
 record.write_text(json.dumps({'pid': os.getpid(), 'cwd': os.getcwd(),
     'env': {k: os.environ.get(k) for k in ['GSETTINGS_SCHEMA_DIR', 'GIO_MODULE_DIR',
     'GDK_PIXBUF_MODULE_FILE', 'GTK_PATH', 'XDG_DATA_DIRS', 'ENCHANT_CONFIG_DIR', 'DICPATH']}}))
+(record.parent / (role + '.' + str(os.getpid()))).write_text('started')
 if role == 'holder-desktop':
     sys.exit(23)
 if os.environ.get('HOLDER_TEST_EXIT'):
-    sys.exit(7)
+    sys.exit(int(os.environ['HOLDER_TEST_EXIT']))
+if os.environ.get('HOLDER_TEST_RACE'):
+    lock = open(record.parent / 'daemon.lock', 'w')
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError: sys.exit(2)
+    deadline = time.monotonic() + 3
+    while len(list(record.parent.glob('holderd.*'))) < 2 and time.monotonic() < deadline:
+        time.sleep(.01)
+    time.sleep(1)
+if os.environ.get('HOLDER_TEST_SILENT'):
+    time.sleep(60)
 server = socket.socket(fileno=int(os.environ['HOLDER_TEST_SOCKET']))
 server.listen()
 while True:
@@ -58,7 +70,12 @@ class LauncherIntegration(unittest.TestCase):
                         HOLDER_TEST_PORT=str(self.sock.getsockname()[1]),
                         HOLDER_TEST_SOCKET=str(self.sock.fileno()),
                         HOLDER_TEST_RECORD=str(self.records))
-        self.env.pop('HOLDER_TEST_EXIT', None)
+        for key in ('HOLDER_TEST_EXIT', 'HOLDER_TEST_RACE', 'HOLDER_TEST_SILENT',
+                    'HOLDER_TEST_ALERT_HELPER', 'HOLDER_TEST_STARTUP_MS'):
+            self.env.pop(key, None)
+        for key in ('GSETTINGS_SCHEMA_DIR', 'GIO_MODULE_DIR', 'GDK_PIXBUF_MODULE_FILE',
+                    'GTK_PATH', 'XDG_DATA_DIRS', 'ENCHANT_CONFIG_DIR', 'DICPATH'):
+            self.env.pop(key, None)
 
     def layout(self, bundle=True):
         if bundle:
@@ -115,7 +132,8 @@ class LauncherIntegration(unittest.TestCase):
         self.assertEqual(code, 23, error)
         self.assertEqual(self.record('holder-desktop')['pid'], pid)
         self.assertNotEqual(self.record('holderd')['pid'], pid)
-        self.assert_environment('holderd')
+        self.assertEqual(self.record('holderd')['cwd'], str(self.root))
+        self.assertTrue(all(value is None for value in self.record('holderd')['env'].values()))
         self.assert_environment('holder-desktop')
 
     def test_developer_cold_start(self):
@@ -141,6 +159,24 @@ class LauncherIntegration(unittest.TestCase):
         self.assertEqual(code, 23, error)
         self.assertFalse((self.records / 'holderd').exists())
 
+    def test_incompatible_service_is_reported_without_spawning(self):
+        self.layout()
+        self.sock.listen()
+        def serve():
+            self.sock.settimeout(5)
+            conn, _ = self.sock.accept()
+            with conn:
+                conn.settimeout(2)
+                conn.recv(1024)
+                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnope')
+        thread = threading.Thread(target=serve)
+        thread.start()
+        self.addCleanup(thread.join, 6)
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 1)
+        self.assertIn("expected ping response", error)
+        self.assertFalse(list(self.records.iterdir()))
+
     def test_missing_bundle_backend_does_not_fall_back(self):
         self.layout()
         (self.bin / 'holderd').unlink()
@@ -162,7 +198,7 @@ class LauncherIntegration(unittest.TestCase):
 
     def test_backend_early_exit(self):
         self.layout()
-        self.env['HOLDER_TEST_EXIT'] = '1'
+        self.env['HOLDER_TEST_EXIT'] = '7'
         _, code, error = self.run_launcher()
         self.assertEqual(code, 1)
         self.assertIn('exit code 7', error)
@@ -176,6 +212,92 @@ class LauncherIntegration(unittest.TestCase):
         self.assertIn('Failed to start ' + str(self.bin / 'holder-desktop'), error)
         self.assertTrue((self.records / 'holderd').exists())
         self.assertFalse((self.records / 'holder-desktop').exists())
+
+    def test_concurrent_cold_launches_share_winner(self):
+        self.layout()
+        self.env['HOLDER_TEST_RACE'] = '1'
+        self.env['HOLDER_TEST_STARTUP_MS'] = '5000'
+        processes = []
+        try:
+            for _ in range(2):
+                p = subprocess.Popen([str(self.launcher)], cwd=self.home, env=self.env,
+                                     pass_fds=(self.sock.fileno(),), start_new_session=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                processes.append(p)
+            for p in processes:
+                self.assertEqual(p.wait(timeout=7), 23)
+            self.assertEqual(len(list(self.records.glob('holderd.*'))), 2)
+            self.assertEqual(len(list(self.records.glob('holder-desktop.*'))), 2)
+        finally:
+            for p in processes:
+                try: os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                p.wait(timeout=3)
+
+    def test_readiness_timeout_does_not_launch_desktop(self):
+        self.layout()
+        self.env['HOLDER_TEST_SILENT'] = '1'
+        self.env['HOLDER_TEST_STARTUP_MS'] = '1000'
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 1)
+        self.assertIn('within 1 seconds', error)
+        self.assertFalse((self.records / 'holder-desktop').exists())
+
+    def test_lock_exit_without_winner_reports_exit_and_timeout(self):
+        self.layout()
+        self.env['HOLDER_TEST_EXIT'] = '2'
+        self.env['HOLDER_TEST_STARTUP_MS'] = '3000'
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 1)
+        self.assertIn('exit code 2', error)
+        self.assertIn('within 3 seconds', error)
+
+    def test_unwritable_log_does_not_prevent_launch(self):
+        self.layout()
+        (self.home / 'Library').write_text('blocks log directory')
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 23, error)
+
+    def test_log_rotation_and_build_identity(self):
+        self.layout()
+        log = self.home / 'Library/Logs/Holder/launcher.log'
+        log.parent.mkdir(parents=True)
+        log.write_text('x' * (256 * 1024))
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 23, error)
+        self.assertTrue(log.with_name('launcher.log.1').exists())
+        self.assertLess(log.stat().st_size, 256 * 1024)
+        self.assertRegex(log.read_text(), r'\d{4}-\d{2}-\d{2}T.*Holder launcher \d+\.\d+\.\d+')
+        self.assertIn('Backend ready after', log.read_text())
+
+    def test_alert_arguments_are_passed_directly(self):
+        self.base = self.base / 'quoted "name" and back\\slash'
+        self.layout()
+        (self.bin / 'holderd').unlink()
+        helper = self.base / "fake alert helper"
+        args_file = self.records / 'alert-args'
+        helper.write_text('#!' + sys.executable + '\nimport json, sys\nfrom pathlib import Path\n' +
+                          'Path(' + repr(str(args_file)) + ').write_text(json.dumps(sys.argv[1:]))\n')
+        helper.chmod(0o755)
+        self.env['HOLDER_TEST_ALERT_HELPER'] = str(helper)
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 1)
+        args = json.loads(args_file.read_text())
+        self.assertEqual(args[0], '-e')
+        message = 'Holder backend was not found:\n\n' + str(self.bin / 'holderd')
+        quoted = message.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+        self.assertEqual(args[1], 'display alert "Holder" message "' + quoted + '"')
+        self.assertEqual(len(args), 2)
+
+    def test_alert_failure_keeps_stderr_and_log(self):
+        self.layout()
+        (self.bin / 'holderd').unlink()
+        self.env['HOLDER_TEST_ALERT_HELPER'] = str(self.base / 'missing-helper')
+        _, code, error = self.run_launcher()
+        self.assertEqual(code, 1)
+        self.assertIn('Holder backend was not found', error)
+        log = (self.home / 'Library/Logs/Holder/launcher.log').read_text()
+        self.assertIn('Could not display error alert', log)
 
 if __name__ == '__main__':
     unittest.main()

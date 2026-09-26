@@ -1,6 +1,7 @@
 #include "BackendProbe.h"
 #include "BackendStartup.h"
 #include "InstallLayout.h"
+#include "RuntimeSupport.h"
 
 #include <Availability.h>
 #include <errno.h>
@@ -13,7 +14,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -56,64 +56,21 @@ std::filesystem::path log_path() {
 }
 
 void append_log(std::string_view message) {
-  try {
-    const auto path = log_path();
-    std::filesystem::create_directories(path.parent_path());
-    std::ofstream out(path, std::ios::app);
-    out << message << "\n";
-  } catch (...) {
-  }
-}
-
-std::string shell_quote(std::string_view value) {
-  std::string quoted = "'";
-  for (const char ch : value) {
-    if (ch == '\'') {
-      quoted += "'\\''";
-    } else {
-      quoted += ch;
-    }
-  }
-  quoted += "'";
-  return quoted;
-}
-
-std::string apple_script_quote(std::string_view value) {
-  std::string quoted = "\"";
-  for (const char ch : value) {
-    if (ch == '\\' || ch == '"') {
-      quoted += '\\';
-    }
-    quoted += ch;
-  }
-  quoted += "\"";
-  return quoted;
+  holder::append_launcher_log(log_path(), message);
 }
 
 void show_error(std::string_view message) {
   append_log(message);
-#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  // stderr remains useful when launched from a terminal or if the alert fails.
   std::fprintf(stderr, "%.*s\n", static_cast<int>(message.size()), message.data());
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  const char* helper = std::getenv("HOLDER_TEST_ALERT_HELPER");
+  if (!helper) return; // Automated tests never open dialogs.
 #else
-  const std::string script =
-      "display alert \"Holder\" message " + apple_script_quote(message);
-  const std::string command = "osascript -e " + shell_quote(script);
-  (void)std::system(command.c_str());
+  const char* helper = "/usr/bin/osascript";
 #endif
-}
-
-void configure_runtime_environment(const std::filesystem::path& working_dir) {
-  setenv("GSETTINGS_SCHEMA_DIR", (working_dir / "share" / "glib-2.0" / "schemas").c_str(), 1);
-  setenv("GIO_MODULE_DIR", (working_dir / "lib" / "gio" / "modules").c_str(), 1);
-  setenv(
-      "GDK_PIXBUF_MODULE_FILE",
-      (working_dir / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders.cache").c_str(),
-      1
-  );
-  setenv("GTK_PATH", (working_dir / "lib" / "gtk-4.0").c_str(), 1);
-  setenv("XDG_DATA_DIRS", (working_dir / "share").c_str(), 1);
-  setenv("ENCHANT_CONFIG_DIR", (working_dir / "share" / "enchant-2").c_str(), 1);
-  setenv("DICPATH", (working_dir / "share" / "enchant" / "hunspell").c_str(), 1);
+  if (!holder::present_alert(message, helper))
+    append_log("Could not display error alert; diagnostic written to stderr.");
 }
 
 bool start_process(
@@ -122,8 +79,6 @@ bool start_process(
     std::string* error,
     pid_t& pid
 ) {
-  configure_runtime_environment(working_dir);
-
   posix_spawn_file_actions_t actions;
   int action_rc = posix_spawn_file_actions_init(&actions);
   if (action_rc != 0) {
@@ -184,7 +139,10 @@ bool exec_process(
     const std::filesystem::path& working_dir,
     std::string* error
 ) {
-  configure_runtime_environment(working_dir);
+  if (const auto setup_error = holder::configure_desktop_environment(working_dir); !setup_error.empty()) {
+    if (error) *error = setup_error;
+    return false;
+  }
 
   if (chdir(working_dir.c_str()) != 0) {
     if (error) {
@@ -205,7 +163,8 @@ bool exec_process(
 
 int run_launcher() {
   const auto layout = holder::resolve_layout(executable_path());
-  append_log("Holder launcher starting");
+  const auto started = holder::StartupClock::now();
+  append_log("Holder launcher " HOLDER_LAUNCHER_VERSION " starting; runtime root: " + layout.root_dir.string());
 
   if (const auto error = holder::validate_layout(layout); !error.empty()) {
     show_error(error);
@@ -213,10 +172,11 @@ int run_launcher() {
   }
 
   pid_t backend_pid = 0;
+  bool incompatible = false;
   const holder::StartupActions actions{
       [] { return holder::StartupClock::now(); },
       [](auto delay) { std::this_thread::sleep_for(delay); },
-      [](auto timeout) { return holder::backend_ping(backend_port(), timeout); },
+      [&](auto timeout) { return holder::backend_ping(backend_port(), timeout, &incompatible); },
       [&] {
         append_log("Backend is not healthy; starting holderd (60-second readiness budget)");
         std::string error;
@@ -224,8 +184,16 @@ int run_launcher() {
         return error;
       },
       [&] { return holder::backend_exit_status(backend_pid); },
+      [&] { return incompatible ?
+          "The service at 127.0.0.1:" + std::to_string(backend_port()) +
+              " did not return Holder's expected ping response. Check for another service or an incompatible backend." : std::string{}; },
   };
-  if (const auto error = holder::ensure_backend(actions); !error.empty()) {
+  auto budget = std::chrono::milliseconds(60000);
+#ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
+  if (const char* value = std::getenv("HOLDER_TEST_STARTUP_MS"))
+    budget = std::chrono::milliseconds(std::stoi(value));
+#endif
+  if (const auto error = holder::ensure_backend(actions, budget); !error.empty()) {
     show_error(error + "\n\nLauncher log:\n" + log_path().string());
     return 1;
   }
@@ -233,7 +201,8 @@ int run_launcher() {
   // A still-running daemon is left alone and survives the desktop exec handoff.
   (void)holder::backend_exit_status(backend_pid);
 
-  append_log("Starting holder-desktop");
+  append_log("Backend ready after " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+      holder::StartupClock::now() - started).count()) + " ms; starting holder-desktop");
   std::string desktop_error;
   if (!exec_process(layout.desktop_exe, layout.root_dir, &desktop_error)) {
     show_error(desktop_error);

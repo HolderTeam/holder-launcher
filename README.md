@@ -148,13 +148,17 @@ launcher without requiring Python.
 
 The launcher checks `127.0.0.1:11499` for HTTP 200 with body `pong`. It allows
 up to 60 seconds for backend readiness and opens the desktop as soon as the
-backend responds. An early backend exit is reported after a final health check;
-a timeout does not kill or restart the backend.
+backend responds. An early backend exit is reported after a final health check.
+Exit code 2 can mean another instance holds the daemon lock, so the launcher
+keeps waiting within that same budget. An incompatible ping response is reported
+without starting another daemon. A timeout does not kill or restart the backend.
 
 Layout is determined by the resolved launcher location, not the working
 directory. App bundles use `Contents/Resources` as the runtime root; developer
 installs use the parent of `bin`. Missing bundle components produce an error
-rather than falling back to adjacent executables.
+rather than falling back to adjacent executables. Bundled GTK runtime variables
+are applied only to the desktop; the backend inherits the launcher's environment.
+Command-line arguments and file/URL activation are not forwarded.
 
 ### Diagnostics
 
@@ -164,3 +168,9 @@ small log to:
 ```text
 ~/Library/Logs/Holder/launcher.log
 ```
+
+The log includes timestamps, launcher version, and startup timing, and rotates
+at 256 KiB with one `.1` backup. Errors also go to stderr if an alert cannot be
+displayed. For backend failures, check `~/.local/share/holder/server/logs/server.log`
+(or `$XDG_DATA_HOME/holder/server/logs/server.log` when an absolute override is set).
+If a bundled executable is missing, restore or reinstall the complete app bundle.

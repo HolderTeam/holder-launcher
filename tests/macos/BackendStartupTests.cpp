@@ -17,7 +17,7 @@ struct Fake {
     [&](auto delay) { require(delay > 0ms && delay <= 250ms, "invalid sleep"); ++sleeps; time += delay; },
     [&](auto budget) { require(budget > 0ms && budget <= 1000ms, "invalid probe budget"); ++probes; return false; },
     [&] { ++starts; return std::string{}; },
-    [] { return std::string{}; }
+    [] { return holder::ChildExit{}; }
   };
   auto elapsed() { return time.time_since_epoch(); }
 };
@@ -85,14 +85,14 @@ int main() {
     const auto result = holder::backend_exit_status(pid);
     close(gate[1]); // Release the child even if the assertion fails.
     waitpid(original, nullptr, 0);
-    require(result.empty() && pid == original, "running child treated as exited");
+    require(result.message.empty() && pid == original, "running child treated as exited");
   });
   test("early exit diagnosed after final probe", [] {
-    Fake f; f.actions.child_exit = [] { return std::string("exit code 7"); };
+    Fake f; f.actions.child_exit = [] { return holder::ChildExit{"exit code 7"}; };
     require(holder::ensure_backend(f.actions) == "exit code 7" && f.probes == 3 && f.sleeps == 0, "exit not checked promptly");
   });
   test("healthy concurrent winner accepted", [] {
-    Fake f; f.actions.child_exit = [] { return std::string("exit code 1"); };
+    Fake f; f.actions.child_exit = [] { return holder::ChildExit{"exit code 1"}; };
     f.actions.probe = [&](auto) { return ++f.probes == 3; };
     require(holder::ensure_backend(f.actions).empty() && f.starts == 1, "winner rejected");
   });
@@ -100,6 +100,18 @@ int main() {
     Fake f; f.actions.probe = [&](auto budget) { ++f.probes; f.time += budget; return false; };
     f.actions.start = [&] { f.time += 59s; return std::string{}; };
     require(!holder::ensure_backend(f.actions).empty() && f.probes == 1 && f.elapsed() == 60s, "probe past deadline");
+  });
+  test("cold concurrent winner can finish starting", [] {
+    Fake f;
+    f.actions.child_exit = [] { return holder::ChildExit{"exit code 2", true}; };
+    f.actions.probe = [&](auto) { return f.elapsed() >= 45s; };
+    require(holder::ensure_backend(f.actions).empty() && f.starts == 1, "cold winner rejected");
+  });
+  test("exit 2 without winner retains diagnostic at deadline", [] {
+    Fake f;
+    f.actions.child_exit = [] { return holder::ChildExit{"exit code 2", true}; };
+    auto error = holder::ensure_backend(f.actions);
+    require(error.find("exit code 2") != std::string::npos && error.find("60 seconds") != std::string::npos && f.elapsed() == 60s, "contention error lost");
   });
   test("native child exit code signal and reaping", [] {
     for (bool signal : {false, true}) {
@@ -113,14 +125,14 @@ int main() {
       std::string exit;
       const auto deadline = holder::StartupClock::now() + 2s;
       while (pid > 0 && holder::StartupClock::now() < deadline) {
-        exit = holder::backend_exit_status(pid);
+        exit = holder::backend_exit_status(pid).message;
         if (exit.empty()) std::this_thread::sleep_for(1ms);
       }
       // Clean up even if the assertion below fails.
       if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, nullptr, 0); }
       require(exit.find(signal ? "signal 15" : "exit code 7") != std::string::npos, "wrong native status");
       require(pid == 0 && waitpid(original, nullptr, WNOHANG) == -1, "child not reaped");
-      require(holder::backend_exit_status(pid).empty(), "exit reported twice");
+      require(holder::backend_exit_status(pid).message.empty(), "exit reported twice");
     }
   });
   return failed == 0 ? 0 : 1;
