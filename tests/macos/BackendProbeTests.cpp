@@ -39,7 +39,16 @@ class Server {
  public:
   Socket listener{socket(AF_INET, SOCK_STREAM, 0)};
   uint16_t port = 0;
-  std::jthread worker;
+  std::thread worker;
+
+  // Xcode 16's libc++ does not provide jthread. Join before listener is destroyed,
+  // including when a test assertion throws. Server operations have bounded waits.
+  ~Server() {
+    if (worker.joinable()) worker.join();
+  }
+
+  Server(const Server&) = delete;
+  Server& operator=(const Server&) = delete;
 
   explicit Server(std::function<void(int)> respond) {
     require(listener.fd >= 0, "server socket");
@@ -51,7 +60,7 @@ class Server {
     require(getsockname(listener.fd, reinterpret_cast<sockaddr*>(&address), &size) == 0, "getsockname");
     port = ntohs(address.sin_port);
     require(listen(listener.fd, 1) == 0, "listen");
-    worker = std::jthread([this, respond] {
+    worker = std::thread([this, respond] {
       pollfd p{listener.fd, POLLIN, 0};
       if (poll(&p, 1, 2000) <= 0) return;
       Socket client{accept(listener.fd, nullptr, nullptr)};
