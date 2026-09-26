@@ -126,6 +126,22 @@ cmake --build build
 
 The output executable is `build/Holder`.
 
+To prepare a launcher build for testing on macOS 11 (Big Sur), use a separate
+build directory and an explicit deployment target:
+
+```sh
+cmake -S . -B build-bigsur -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build build-bigsur
+```
+
+Build for the test machine's architecture (add `-DCMAKE_OSX_ARCHITECTURES=x86_64`
+for an Intel Mac when building on Apple Silicon). The launcher uses the standard
+spawn working-directory action on macOS 26+ and the older extension on earlier
+systems, including when compiled with an older SDK. This does not establish a
+minimum macOS version for the full app: the backend, frontend, and their bundled
+dependencies also need compatible builds and testing on the target system.
+
 ### Diagnostics
 
 Failures are reported with a native macOS alert. The launcher also appends a

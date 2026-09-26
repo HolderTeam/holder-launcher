@@ -1,3 +1,4 @@
+#include <Availability.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -191,8 +192,35 @@ bool start_process(
   configure_runtime_environment(working_dir);
 
   posix_spawn_file_actions_t actions;
-  posix_spawn_file_actions_init(&actions);
-  posix_spawn_file_actions_addchdir_np(&actions, working_dir.c_str());
+  int action_rc = posix_spawn_file_actions_init(&actions);
+  if (action_rc != 0) {
+    if (error) {
+      *error = "Failed to initialize spawn actions: " + std::string(std::strerror(action_rc));
+    }
+    return false;
+  }
+
+  // Older SDKs only declare the extension; older systems still need it at runtime.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (__builtin_available(macOS 26.0, *)) {
+    action_rc = posix_spawn_file_actions_addchdir(&actions, working_dir.c_str());
+  } else
+#endif
+  {
+    // Required on pre-26 macOS; suppress deprecation only for this fallback.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    action_rc = posix_spawn_file_actions_addchdir_np(&actions, working_dir.c_str());
+#pragma clang diagnostic pop
+  }
+  if (action_rc != 0) {
+    posix_spawn_file_actions_destroy(&actions);
+    if (error) {
+      *error = "Failed to configure working directory " + working_dir.string() + ": " +
+               std::strerror(action_rc);
+    }
+    return false;
+  }
 
   pid_t pid = 0;
   std::string executable = exe.string();
