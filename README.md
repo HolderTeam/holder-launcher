@@ -93,6 +93,12 @@ appends a small log to:
 %LOCALAPPDATA%\holder\launcher.log
 ```
 
+The UTF-8 log records version, timestamps, installation paths and startup timing;
+it rotates at 256 KiB with one `.1` backup. Backend failures also show the expected
+daemon log path: normally `%USERPROFILE%\.local\share\holder\server\logs\server.log`,
+with `HOME` taking precedence over `USERPROFILE` and an absolute `XDG_DATA_HOME`
+overriding the data root.
+
 ## macOS
 
 `Holder` is also the user-facing executable inside `Holder.app`.

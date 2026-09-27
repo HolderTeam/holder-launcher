@@ -132,7 +132,7 @@ class Server:
 class ProbeTests(unittest.TestCase):
     def probe(self, port, expected, timeout=500, repetitions=1):
         result = subprocess.run([PROBE, str(port), str(timeout), str(repetitions)],
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, encoding="utf-8", timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = [line.split() for line in result.stdout.splitlines()]
         self.assertEqual(len(rows), repetitions)
@@ -245,10 +245,10 @@ class LauncherTests(unittest.TestCase):
             pid = int(marker.name.split(".")[-2])
             self.assertFalse(fixture_running(pid, 3000), f"Fixture {pid} did not stop")
 
-    def launch(self, port, success, budget=5000, error="expected Holder ping response"):
+    def launch(self, port, success, budget=5000, error="expected Holder ping response", expect_log=True):
         start = time.monotonic()
         result = subprocess.run([self.launcher_path, str(port), str(budget)], cwd=self.root.parent,
-                                env=self.env, capture_output=True, text=True, timeout=12)
+                                env=self.env, capture_output=True, text=True, encoding="utf-8", timeout=12)
         self.elapsed = time.monotonic() - start
         self.assertEqual(result.returncode, 0 if success else 1, result.stdout + result.stderr)
         if success:
@@ -259,8 +259,9 @@ class LauncherTests(unittest.TestCase):
         else:
             self.assertFalse(self.desktop.exists())
             self.assertIn(error, result.stderr)
-            self.assertIn(error,
-                          (self.root / "local" / "holder" / "launcher.log").read_text())
+            if expect_log:
+                self.assertIn(error,
+                              (Path(self.env["LOCALAPPDATA"]) / "holder" / "launcher.log").read_text(encoding="utf-8"))
         return result
 
     def test_healthy_reuse(self):
@@ -313,14 +314,14 @@ class LauncherTests(unittest.TestCase):
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
             self.launch(reserved.getsockname()[1], False, budget=1800, error="within 1800 milliseconds")
-        self.assertTrue(fixture_running(int(self.backend.read_text())))
+        self.assertTrue(fixture_running(int(self.backend.read_text(encoding="utf-8"))))
         self.assertFalse(self.desktop.exists())
         self.assertLess(self.elapsed, 2.8)
 
     def test_slow_successful_startup(self):
         with Server([(0, PONG)], start_when=self.backend, start_delay=.6) as server:
             self.launch(server.port, True)
-        self.assertTrue(fixture_running(int(self.backend.read_text())))
+        self.assertTrue(fixture_running(int(self.backend.read_text(encoding="utf-8"))))
         self.assertLess(self.elapsed, 5)
 
     def test_two_concurrent_cold_launchers_reuse_winner(self):
@@ -346,8 +347,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(list(self.root.glob("holderd.exe.*.started"))), 2)
         self.assertEqual(len(list(self.root.glob("loser.*"))), 1)
         self.assertEqual(len(list(self.root.glob("holder-desktop.exe.*.started"))), 2)
-        self.assertTrue(fixture_running(int((self.root / "winner.ready").read_text())))
-        self.assertIn("exit code 2", (self.root / "local" / "holder" / "launcher.log").read_text())
+        self.assertTrue(fixture_running(int((self.root / "winner.ready").read_text(encoding="utf-8"))))
+        self.assertIn("exit code 2", (self.root / "local" / "holder" / "launcher.log").read_text(encoding="utf-8"))
 
     def test_incomplete_package_ignores_adjacent_decoys(self):
         (self.root / "bin" / "holder-desktop.exe").unlink()
@@ -404,6 +405,70 @@ class LauncherTests(unittest.TestCase):
             result = self.launch(server.port, False, error="Failed to start")
         self.assertIn(str(self.root / "bin" / "holder-desktop.exe"), result.stderr)
         self.assertFalse(self.backend.exists())
+
+    def test_log_metadata_and_timing(self):
+        with Server([(0, PONG)]) as server:
+            self.launch(server.port, True)
+        log = (self.root / "local" / "holder" / "launcher.log").read_text(encoding="utf-8")
+        version = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
+        self.assertIn(f"[launcher={version}]", log)
+        self.assertRegex(log, r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[pid=\d+\]")
+        self.assertIn(f"stage=starting root={self.root}", log)
+        self.assertIn(f"backend={self.root / 'bin' / 'holderd.exe'}", log)
+        self.assertRegex(log, r"stage=complete elapsed_ms=\d+")
+
+    def test_blocked_log_directory_does_not_prevent_startup(self):
+        (self.root / "local").mkdir()
+        (self.root / "local" / "holder").write_text("blocked")
+        with Server([(0, PONG)]) as server:
+            self.launch(server.port, True)
+
+    def test_blocked_log_directory_does_not_hide_error(self):
+        (self.root / "local").mkdir()
+        (self.root / "local" / "holder").write_text("blocked")
+        with Server([(0, PONG.replace(b"pong", b"nope"))]) as server:
+            self.launch(server.port, False, expect_log=False)
+
+    def test_contended_log_lock_does_not_delay_startup(self):
+        directory = self.root / "local" / "holder"
+        directory.mkdir(parents=True)
+        lock = directory / "launcher.log.lock"
+        lock.write_bytes(b"")
+        with locked_executable(lock), Server([(0, PONG)]) as server:
+            self.launch(server.port, True)
+        self.assertLess(self.elapsed, 2)
+        self.assertFalse((directory / "launcher.log").exists())
+
+    def test_log_rotation_through_entrypoint(self):
+        directory = self.root / "local" / "holder"
+        directory.mkdir(parents=True)
+        (directory / "launcher.log").write_bytes(b"x" * (256 * 1024))
+        (directory / "launcher.log.1").write_text("older backup")
+        with Server([(0, PONG)]) as server:
+            self.launch(server.port, True)
+        self.assertEqual((directory / "launcher.log.1").read_bytes(), b"x" * (256 * 1024))
+        self.assertLess((directory / "launcher.log").stat().st_size, 256 * 1024)
+        self.assertIn("stage=complete", (directory / "launcher.log").read_text(encoding="utf-8"))
+
+    def test_unicode_error_is_preserved_in_log_and_stderr(self):
+        self.root = self.root / "Holder \u96ea's space"
+        self.root.mkdir()
+        self.launcher_path = self.root / "Holder.exe"
+        shutil.copy2(LAUNCHER, self.launcher_path)
+        expected = str(self.root / "bin" / "holderd.exe")
+        with Server([(0, PONG)]) as server:
+            result = self.launch(server.port, False, error=expected)
+            self.assertEqual(server.requests, [])
+        self.assertIn(expected, result.stderr)
+
+    def test_backend_log_hint_honors_inherited_environment(self):
+        self.env["XDG_DATA_HOME"] = str(self.root / "backend data")
+        self.env["HOME"] = str(self.root / "unused home")
+        with Server([(0, PONG.replace(b"pong", b"nope"))]) as server:
+            result = self.launch(server.port, False)
+        expected = self.root / "backend data" / "holder" / "server" / "logs" / "server.log"
+        self.assertIn(str(expected), result.stderr)
+        self.assertFalse((self.root / "backend data").exists())
 
 
 if __name__ == "__main__":
