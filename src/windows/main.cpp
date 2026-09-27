@@ -2,11 +2,10 @@
 
 #include "BackendStartup.h"
 #include "InstallLayout.h"
+#include "Diagnostics.h"
 
 #include <chrono>
 #include <filesystem>
-#include <fstream>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -60,7 +59,7 @@ std::wstring last_error_message(DWORD error_code) {
   while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n')) {
     message.pop_back();
   }
-  return message;
+  return L"Windows error " + std::to_wstring(error_code) + L": " + message;
 }
 
 std::filesystem::path executable_path() {
@@ -82,45 +81,22 @@ std::filesystem::path executable_path() {
   }
 }
 
-std::optional<std::filesystem::path> env_path(const wchar_t* name) {
-  const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
-  if (required == 0) {
-    return std::nullopt;
-  }
-  std::wstring value(required, L'\0');
-  const DWORD written = GetEnvironmentVariableW(name, value.data(), required);
-  if (written == 0 || written >= required) {
-    return std::nullopt;
-  }
-  value.resize(written);
-  return std::filesystem::path(value);
+const auto launch_started = std::chrono::steady_clock::now();
+
+std::wstring elapsed_ms() {
+  return std::to_wstring(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - launch_started).count());
 }
 
-std::filesystem::path log_path() {
-  auto local_app_data = env_path(L"LOCALAPPDATA");
-  if (!local_app_data) {
-    local_app_data = env_path(L"TEMP");
-  }
-  if (!local_app_data) {
-    return std::filesystem::path(L"holder-launcher.log");
-  }
-  return *local_app_data / L"holder" / L"launcher.log";
-}
-
-void append_log(std::wstring_view message) {
-  try {
-    const auto path = log_path();
-    std::filesystem::create_directories(path.parent_path());
-    std::wofstream out(path, std::ios::app);
-    out << message << L"\n";
-  } catch (...) {
-  }
+void append_log(std::wstring_view message) noexcept {
+  try { holder::append_launcher_log(holder::launcher_log_path(), message); }
+  catch (...) { }
 }
 
 void show_error(std::wstring_view message) {
-  append_log(message);
+  append_log(L"stage=error elapsed_ms=" + elapsed_ms() + L" " + std::wstring(message));
 #ifdef HOLDER_LAUNCHER_INTEGRATION_TEST
-  std::wcerr << message << L"\n";
+  std::cerr << holder::utf8(message) << "\n";
 #else
   const std::wstring text(message);
   MessageBoxW(nullptr, text.c_str(), L"Holder", MB_OK | MB_ICONERROR);
@@ -154,9 +130,10 @@ bool start_process(
   );
 
   if (!started) {
+    const DWORD code = GetLastError();
     if (error) {
       *error = L"Failed to start " + exe.wstring() + L": " +
-               last_error_message(GetLastError());
+               last_error_message(code);
     }
     return false;
   }
@@ -169,7 +146,8 @@ bool start_process(
 
 int run_launcher() {
   const auto layout = holder::resolve_layout(executable_path());
-  append_log(L"Holder launcher starting");
+  append_log(L"stage=starting root=" + layout.root_dir.wstring() +
+             L" backend=" + layout.backend_exe.wstring() + L" desktop=" + layout.desktop_exe.wstring());
 
   if (const auto error = holder::validate_layout(layout); !error.empty()) {
     show_error(error);
@@ -182,7 +160,7 @@ int run_launcher() {
       [](auto delay) { std::this_thread::sleep_for(delay); },
       [](auto allowance) { return holder::backend_ping(kBackendPort, allowance); },
       [&] {
-        append_log(L"Backend is not healthy; starting holderd.exe");
+        append_log(L"stage=backend_start Starting holderd.exe");
         std::wstring error;
         start_process(layout.backend_exe, layout.root_dir, CREATE_NO_WINDOW, &error, &backend.value);
         return error;
@@ -194,18 +172,20 @@ int run_launcher() {
       },
   };
   if (const auto error = holder::ensure_backend(actions, kStartupBudget); !error.empty()) {
-    show_error(error + L"\n\nLauncher log:\n" + log_path().wstring());
+    show_error(error + L"\n\nLauncher log:\n" + holder::launcher_log_path().wstring() +
+               L"\n\nBackend log (if created with this environment):\n" +
+               holder::backend_log_path(layout.root_dir).wstring());
     return 1;
   }
 
-  append_log(L"Starting holder-desktop.exe");
+  append_log(L"stage=desktop_start elapsed_ms=" + elapsed_ms() + L" Starting holder-desktop.exe");
   std::wstring desktop_error;
   if (!start_process(layout.desktop_exe, layout.root_dir, 0, &desktop_error)) {
     show_error(desktop_error);
     return 1;
   }
 
-  append_log(L"Holder launcher complete");
+  append_log(L"stage=complete elapsed_ms=" + elapsed_ms());
   return 0;
 }
 
