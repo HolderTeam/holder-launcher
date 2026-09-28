@@ -413,7 +413,8 @@ class LauncherTests(unittest.TestCase):
         version = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
         self.assertIn(f"[launcher={version}]", log)
         self.assertRegex(log, r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[pid=\d+\]")
-        self.assertIn(f"stage=starting root={self.root}", log)
+        self.assertIn(f"root={self.root}", log)
+        self.assertRegex(log, r"stage=starting source=(?:[0-9a-f]{40,64}|unknown)(?:-dirty)? ")
         self.assertIn(f"backend={self.root / 'bin' / 'holderd.exe'}", log)
         self.assertRegex(log, r"stage=complete elapsed_ms=\d+")
 

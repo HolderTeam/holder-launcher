@@ -205,5 +205,8 @@ If a bundled executable is missing, restore or reinstall the complete app bundle
 
 ## Development status
 
+CI artifacts include build identity, SHA-256 checksums and debug symbols. See
+[build artifacts](docs/ARTIFACTS.md) for packaging, verification and release handoff.
+
 Implementation notes, validation history and remaining release work are tracked
 in the [release readiness plan](https://github.com/HolderTeam/holder-planning/blob/main/current/release/HOLDER_LAUNCHER_RELEASE_READINESS_PLAN.md).

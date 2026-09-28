@@ -31,39 +31,16 @@ jobs:
       - name: Test macOS launcher components
         run: ctest --test-dir build --output-on-failure
 
-      - name: Stage launcher artifact
-        run: |
-          set -euo pipefail
+      - name: Stage launcher artifact with provenance and symbols
+        run: cmake --build build --target stage_artifact
 
-          stage_dir="out/artifacts/macos-launcher"
-          rm -rf "${stage_dir}"
-          mkdir -p "${stage_dir}"
-
-          cp build/Holder "${stage_dir}/Holder"
-
-          (
-            cd "${stage_dir}"
-            find . -type f \
-              | sed 's#^\./##' \
-              | sort \
-              > manifest.txt
-          )
-
-          find "${stage_dir}" -type f -maxdepth 2 -print | sort
-
-      - name: Check staged launcher artifact integrity
-        run: |
-          set -euo pipefail
-
-          test -f out/artifacts/macos-launcher/Holder
-          test -f out/artifacts/macos-launcher/manifest.txt
-          test -s out/artifacts/macos-launcher/Holder
-          grep -qx 'Holder' out/artifacts/macos-launcher/manifest.txt
+      - name: Verify staged artifact checksums and inventory
+        run: python3 scripts/artifact.py verify build/artifacts/RelWithDebInfo
 
       - name: Upload launcher artifact
         uses: actions/upload-artifact@v4
         with:
           name: holder-launcher-macos
-          path: out/artifacts/macos-launcher/*
+          path: build/artifacts/RelWithDebInfo/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90

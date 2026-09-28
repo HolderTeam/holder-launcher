@@ -43,53 +43,16 @@ jobs:
       - name: Test Windows probe and launcher
         run: ctest --test-dir build --output-on-failure
 
-      - name: Stage launcher artifact
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
+      - name: Stage launcher artifact with provenance and symbols
+        run: cmake --build build --target stage_artifact
 
-          $stageDir = "out\artifacts\windows-launcher"
-          if (Test-Path $stageDir) {
-            Remove-Item $stageDir -Recurse -Force
-          }
-
-          New-Item -ItemType Directory -Force $stageDir | Out-Null
-          Copy-Item "build\Holder.exe" -Destination $stageDir -Force
-
-          Get-ChildItem $stageDir -Recurse -File |
-            ForEach-Object { $_.FullName.Substring((Resolve-Path $stageDir).Path.Length + 1).Replace("\", "/") } |
-            Sort-Object |
-            Set-Content -Encoding UTF8 (Join-Path $stageDir "manifest.txt")
-
-          Get-ChildItem $stageDir -Recurse -File |
-            Select-Object FullName, Length |
-            Sort-Object FullName
-
-      - name: Check staged launcher artifact integrity
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $launcher = "out\artifacts\windows-launcher\Holder.exe"
-          $manifest = "out\artifacts\windows-launcher\manifest.txt"
-
-          if (!(Test-Path $launcher)) {
-            throw "Missing launcher executable: $launcher"
-          }
-          if (!(Test-Path $manifest)) {
-            throw "Missing launcher manifest: $manifest"
-          }
-          if ((Get-Item $launcher).Length -le 0) {
-            throw "Launcher executable is empty"
-          }
-          if (!(Select-String -Path $manifest -Pattern "^Holder\.exe$" -Quiet)) {
-            throw "Launcher manifest does not list Holder.exe"
-          }
+      - name: Verify staged artifact checksums and inventory
+        run: python scripts/artifact.py verify build/artifacts/RelWithDebInfo
 
       - name: Upload launcher artifact
         uses: actions/upload-artifact@v4
         with:
           name: holder-launcher-windows
-          path: out/artifacts/windows-launcher/*
+          path: build/artifacts/RelWithDebInfo/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90

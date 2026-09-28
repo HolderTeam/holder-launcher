@@ -3,6 +3,7 @@
 #include "BackendStartup.h"
 #include "InstallLayout.h"
 #include "Diagnostics.h"
+#include "BuildIdentity.h"
 
 #include <chrono>
 #include <filesystem>
@@ -146,7 +147,7 @@ bool start_process(
 
 int run_launcher() {
   const auto layout = holder::resolve_layout(executable_path());
-  append_log(L"stage=starting root=" + layout.root_dir.wstring() +
+  append_log(L"stage=starting source=" HOLDER_BUILD_SOURCE_W L" root=" + layout.root_dir.wstring() +
              L" backend=" + layout.backend_exe.wstring() + L" desktop=" + layout.desktop_exe.wstring());
 
   if (const auto error = holder::validate_layout(layout); !error.empty()) {

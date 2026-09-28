@@ -7,6 +7,7 @@ if(NOT HOLDER_LAUNCHER_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
 endif()
 
 project(holder_launcher VERSION "${HOLDER_LAUNCHER_VERSION}" LANGUAGES CXX)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 include(CTest)
 
 if(WIN32)
@@ -153,3 +154,5 @@ if(WIN32)
     winhttp
   )
 endif()
+
+include(cmake/ArtifactProvenance.cmake)
