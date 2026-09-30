@@ -2,6 +2,7 @@
 #include "BackendStartup.h"
 #include "InstallLayout.h"
 #include "RuntimeSupport.h"
+#include "BuildIdentity.h"
 
 #include <Availability.h>
 #include <errno.h>
@@ -164,7 +165,7 @@ bool exec_process(
 int run_launcher() {
   const auto layout = holder::resolve_layout(executable_path());
   const auto started = holder::StartupClock::now();
-  append_log("Holder launcher " HOLDER_LAUNCHER_VERSION " starting; runtime root: " + layout.root_dir.string());
+    append_log("Holder launcher " HOLDER_LAUNCHER_VERSION " source=" HOLDER_BUILD_SOURCE " starting; runtime root: " + layout.root_dir.string());
 
   if (const auto error = holder::validate_layout(layout); !error.empty()) {
     show_error(error);
