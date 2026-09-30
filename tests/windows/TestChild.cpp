@@ -6,6 +6,9 @@
 
 int wmain(int argc, wchar_t** argv) {
   if (argc < 1) return 2;
+  wchar_t marker_delay[32]{};
+  if (GetEnvironmentVariableW(L"HOLDER_TEST_MARKER_DELAY", marker_delay, 32) > 0)
+    Sleep(static_cast<DWORD>(std::wcstoul(marker_delay, nullptr, 10)));
   const auto name = std::filesystem::path(argv[0]).filename().string();
   const auto pid = std::to_string(GetCurrentProcessId());
   std::ofstream(name + "." + pid + ".started") << pid;

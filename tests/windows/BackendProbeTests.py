@@ -235,7 +235,7 @@ class LauncherTests(unittest.TestCase):
         self.env = dict(os.environ, LOCALAPPDATA=str(self.root / "local"), TEMP=str(self.root))
         self.backend = self.root / "holderd.exe.started"
         self.desktop = self.root / "holder-desktop.exe.started"
-        for key in ("HOLDER_TEST_EXIT", "HOLDER_TEST_RACE"):
+        for key in ("HOLDER_TEST_EXIT", "HOLDER_TEST_RACE", "HOLDER_TEST_MARKER_DELAY"):
             self.env.pop(key, None)
         self.addCleanup(self.stop_children)
 
@@ -244,6 +244,33 @@ class LauncherTests(unittest.TestCase):
         for marker in self.root.glob("*.exe.*.started"):
             pid = int(marker.name.split(".")[-2])
             self.assertFalse(fixture_running(pid, 3000), f"Fixture {pid} did not stop")
+        # CreateProcess can return before the child publishes its PID marker.
+        # Keep the stop signal and directory intact until Windows releases every
+        # fixture executable, including children absent from the marker snapshot.
+        deadline = time.monotonic() + 5
+        for executable in self.root.rglob("*.exe"):
+            while True:
+                try:
+                    executable.unlink()
+                    break
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.01)
+
+    def test_cleanup_waits_for_child_before_pid_marker(self):
+        self.env["HOLDER_TEST_MARKER_DELAY"] = "800"
+        child = subprocess.Popen([self.root / "bin" / "holderd.exe"],
+                                 cwd=self.root, env=self.env)
+        try:
+            self.stop_children()
+            self.assertEqual(child.wait(timeout=1), 0)
+            self.assertTrue(self.backend.exists())
+            self.assertFalse((self.root / "bin" / "holderd.exe").exists())
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)
 
     def launch(self, port, success, budget=5000, error="expected Holder ping response", expect_log=True):
         start = time.monotonic()
