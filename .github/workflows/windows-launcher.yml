@@ -6,12 +6,20 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: Launcher configuration
+        type: choice
+        options: [RelWithDebInfo, Release]
+        default: RelWithDebInfo
 
 permissions:
   contents: read
 
 jobs:
   build:
+    env:
+      BUILD_TYPE: ${{ inputs.build_type || 'RelWithDebInfo' }}
     runs-on: windows-latest
 
     steps:
@@ -33,7 +41,7 @@ jobs:
             -S . `
             -B build `
             -G Ninja `
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE" `
             -DCMAKE_CXX_COMPILER=cl `
             -DBUILD_TESTING=ON
 
@@ -47,12 +55,12 @@ jobs:
         run: cmake --build build --target stage_artifact
 
       - name: Verify staged artifact checksums and inventory
-        run: python scripts/artifact.py verify build/artifacts/RelWithDebInfo
+        run: python scripts/artifact.py verify build/artifacts/${{ inputs.build_type || 'RelWithDebInfo' }}
 
       - name: Upload launcher artifact
         uses: actions/upload-artifact@v4
         with:
-          name: holder-launcher-windows
-          path: build/artifacts/RelWithDebInfo/
+          name: holder-launcher-windows${{ inputs.build_type == 'Release' && '-release' || '' }}
+          path: build/artifacts/${{ inputs.build_type || 'RelWithDebInfo' }}/
           if-no-files-found: error
           retention-days: 90
