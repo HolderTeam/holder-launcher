@@ -68,6 +68,15 @@ add_custom_command(TARGET Holder POST_BUILD
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CaptureBuild.cmake"
   VERBATIM)
 
+# Keep crash-debugging symbols for optimized Release artifacts too. They are
+# staged separately and are not installed with the launcher executable.
+if(MSVC)
+  target_compile_options(Holder PRIVATE "$<$<CONFIG:Release>:/Zi>")
+  target_link_options(Holder PRIVATE "$<$<CONFIG:Release>:/DEBUG>")
+elseif(APPLE)
+  target_compile_options(Holder PRIVATE "$<$<CONFIG:Release>:-g>")
+endif()
+
 if(APPLE)
   find_program(DSYMUTIL_EXECUTABLE dsymutil REQUIRED)
   add_custom_command(TARGET Holder POST_BUILD
