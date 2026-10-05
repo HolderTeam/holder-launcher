@@ -1,3 +1,5 @@
+> **This repository has moved to [holder-framework](https://github.com/HolderTeam/holder-framework).** The launcher now lives in [`launcher/`](https://github.com/HolderTeam/holder-framework/tree/main/launcher), with its full history. This repository is kept as an archive and is no longer updated.
+
 # holder-launcher
 
 Starts the Holder backend (`holderd`) if needed, waits for it to respond, then
